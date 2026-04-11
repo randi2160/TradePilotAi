@@ -58,6 +58,24 @@ except Exception as e:
     copy_router = None
     _has_copy   = False
     print(f"⚠️  Copy routes not loaded: {e}")
+
+try:
+    from services.ipo_routes import router as ipo_router
+    _has_ipo = True
+    print("✅ IPO routes loaded")
+except Exception as e:
+    ipo_router = None
+    _has_ipo   = False
+    print(f"⚠️  IPO routes not loaded: {e}")
+
+try:
+    from services.admin_routes import router as admin_router
+    _has_admin = True
+    print("✅ Admin routes loaded")
+except Exception as e:
+    admin_router = None
+    _has_admin   = False
+    print(f"⚠️  Admin routes not loaded: {e}")
 from data.ai_advisor      import AIAdvisor
 from data.dynamic_watchlist import DynamicWatchlistBuilder
 from data.market_scanner  import MarketScanner
@@ -192,6 +210,10 @@ if _has_social and social_router:
     app.include_router(social_router)
 if _has_copy and copy_router:
     app.include_router(copy_router)
+if _has_ipo and ipo_router:
+    app.include_router(ipo_router)
+if _has_admin and admin_router:
+    app.include_router(admin_router)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

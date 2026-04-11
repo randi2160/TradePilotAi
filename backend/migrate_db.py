@@ -105,3 +105,36 @@ def migrate():
 
 if __name__ == "__main__":
     migrate()
+
+# Compliance tables
+USER_COMPLIANCE_COLUMNS = [
+    ("is_admin", "INTEGER DEFAULT 0"),
+    ("last_login", "TIMESTAMP"),
+    ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+    ("mfa_enabled", "INTEGER DEFAULT 0"),
+    ("failed_login_attempts", "INTEGER DEFAULT 0"),
+    ("locked_until", "TIMESTAMP"),
+]
+
+def migrate_compliance():
+    if not os.path.exists(DB_PATH):
+        print(f"❌ {DB_PATH} not found")
+        return
+    conn   = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    print("📦 Migrating compliance columns...")
+    existing = get_existing_columns(cursor, "users")
+    for col, defn in USER_COMPLIANCE_COLUMNS:
+        if col not in existing:
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
+                print(f"  ✅ users.{col} added")
+            except Exception as e:
+                print(f"  ⚠️  users.{col}: {e}")
+    conn.commit()
+    conn.close()
+    print("✅ Compliance migration done")
+
+if __name__ == "__main__":
+    migrate()
+    migrate_compliance()

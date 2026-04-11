@@ -47,6 +47,7 @@ class User(Base):
     dynamic_watchlist = Column(Boolean,  default=False)
 
     is_active        = Column(Boolean, default=True)
+    is_admin         = Column(Boolean, default=False)
     created_at       = Column(DateTime, default=datetime.utcnow)
     last_login       = Column(DateTime, nullable=True)
 
@@ -372,3 +373,65 @@ class SocialNotification(Base):
     data         = Column(JSON, default={})
     is_read      = Column(Boolean, default=False)
     created_at   = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+# ── Compliance & Admin Models ─────────────────────────────────────────────────
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    event_type    = Column(String(80), nullable=False, index=True)
+    user_id       = Column(Integer, nullable=True, index=True)
+    user_email    = Column(String(255), nullable=True)
+    ip_address    = Column(String(45), nullable=True)
+    user_agent    = Column(String(500), nullable=True)
+    payload       = Column(Text, nullable=True)
+    severity      = Column(String(20), default="info")
+    prev_hash     = Column(String(64), nullable=True)
+    entry_hash    = Column(String(64), nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    is_exported   = Column(Boolean, default=False)
+
+
+class ConsentRecord(Base):
+    __tablename__ = "consent_records"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    user_id          = Column(Integer, nullable=False, index=True)
+    user_email       = Column(String(255), nullable=False)
+    consent_type     = Column(String(80), nullable=False)
+    document_version = Column(String(20), nullable=False)
+    document_hash    = Column(String(64), nullable=False)
+    accepted         = Column(Boolean, default=True)
+    ip_address       = Column(String(45), nullable=True)
+    user_agent       = Column(String(500), nullable=True)
+    signature_hash   = Column(String(64), nullable=False)
+    created_at       = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class LegalDocument(Base):
+    __tablename__ = "legal_documents"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    doc_type     = Column(String(50), nullable=False, index=True)
+    version      = Column(String(20), nullable=False)
+    title        = Column(String(200), nullable=False)
+    content      = Column(Text, nullable=False)
+    is_active    = Column(Boolean, default=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by   = Column(Integer, nullable=True)
+    content_hash = Column(String(64), nullable=False, default="")
+
+
+class CompanySettings(Base):
+    __tablename__ = "company_settings"
+
+    id          = Column(Integer, primary_key=True)
+    key         = Column(String(100), unique=True, nullable=False, index=True)
+    value       = Column(Text, nullable=True)
+    description = Column(String(500), nullable=True)
+    is_public   = Column(Boolean, default=False)
+    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by  = Column(Integer, nullable=True)
