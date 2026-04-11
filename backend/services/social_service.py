@@ -153,6 +153,14 @@ class SocialService:
         # Notify followers
         self._notify_followers(user.id, broadcast)
 
+        # Trigger copy trading engine
+        try:
+            from services.copy_engine import CopyTradingEngine
+            copy_engine = CopyTradingEngine(self.db)
+            copy_engine.process_broadcast(broadcast, user)
+        except Exception as e:
+            logger.debug(f"Copy engine skipped: {e}")
+
         # Update profile stats
         self.update_profile_stats(user.id)
 

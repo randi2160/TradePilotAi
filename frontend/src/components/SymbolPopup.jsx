@@ -49,10 +49,19 @@ export default function SymbolPopup({ symbol, position, onClose }) {
     setPosting(true)
     try {
       const r = await api.post(`/social/chat/${symbol}`, { content: msg, sentiment })
-      if (r.data.error) { alert(r.data.error); return }
+      if (r.data?.error) {
+        alert(`Blocked: ${r.data.error}`)
+        return
+      }
+      if (r.data?.warning) {
+        alert(`⚠️ Warning: ${r.data.warning}`)
+      }
       setMsg('')
-      loadChat()
-    } catch {} finally { setPosting(false) }
+      await loadChat()
+    } catch(e) {
+      const detail = e.response?.data?.detail ?? e.message
+      alert(`Could not post: ${detail}`)
+    } finally { setPosting(false) }
   }
 
   async function handleAdd() {

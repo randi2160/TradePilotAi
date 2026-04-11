@@ -44,9 +44,20 @@ from broker.broker_routes   import router as broker_router
 try:
     from social.social_routes import router as social_router
     _has_social = True
-except ImportError:
+    print("✅ Social routes loaded")
+except Exception as e:
     social_router = None
     _has_social   = False
+    print(f"⚠️  Social routes not loaded: {e}")
+
+try:
+    from services.copy_routes import router as copy_router
+    _has_copy = True
+    print("✅ Copy routes loaded")
+except Exception as e:
+    copy_router = None
+    _has_copy   = False
+    print(f"⚠️  Copy routes not loaded: {e}")
 from data.ai_advisor      import AIAdvisor
 from data.dynamic_watchlist import DynamicWatchlistBuilder
 from data.market_scanner  import MarketScanner
@@ -179,6 +190,8 @@ app.include_router(dual_router)
 app.include_router(broker_router)
 if _has_social and social_router:
     app.include_router(social_router)
+if _has_copy and copy_router:
+    app.include_router(copy_router)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

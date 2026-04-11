@@ -27,11 +27,13 @@ import LiveTicker           from './components/LiveTicker'
 import BrokerManager        from './components/BrokerManager'
 import ActivityLog          from './components/ActivityLog'
 import SocialFeed           from './components/SocialFeed'
+import CopyTrading          from './components/CopyTrading'
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
   { id: 'ai',          label: '🧠', full: 'AI Advisor'    },
   { id: 'social',      label: '👥', full: 'Social'        },
+  { id: 'copy',        label: '📋', full: 'Copy Trading'  },
   { id: 'portfolio',   label: '💰', full: 'Portfolio'     },
   { id: 'goals',       label: '🎯', full: 'Goals'         },
   { id: 'report',      label: '📄', full: 'Daily Report'  },
@@ -179,6 +181,7 @@ function TradingApp() {
         {tab === 'dashboard'   && <div className="space-y-5"><PortfolioChart capital={capital}/><Dashboard data={data}/></div>}
         {tab === 'ai'          && <AIAdvisor           onAddToWatchlist={handleAddToWatchlist}/>}
         {tab === 'social'      && <SocialFeed           currentUserId={user?.id}/>}
+        {tab === 'copy'        && <CopyTrading/>}
         {tab === 'portfolio'   && <PortfolioChart       capital={capital}/>}
         {tab === 'goals'       && <GoalSetting          capital={capital}/>}
         {tab === 'report'      && <DailyReport/>}
