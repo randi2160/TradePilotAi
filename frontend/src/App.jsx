@@ -29,6 +29,7 @@ import ActivityLog          from './components/ActivityLog'
 import SocialFeed           from './components/SocialFeed'
 import CopyTrading          from './components/CopyTrading'
 import IPOIntelligence      from './components/IPOIntelligence'
+import AdminPanel          from './components/AdminPanel'
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
@@ -55,6 +56,7 @@ const TABS = [
   { id: 'broker',      label: '🔌', full: 'My Broker'     },
   { id: 'settings',    label: '🛠️', full: 'Settings'      },
   { id: 'profile',     label: '👤', full: 'Profile'       },
+  { id: 'admin',       label: '🛡️', full: 'Admin'         },
 ]
 
 function TradingApp() {
@@ -185,6 +187,7 @@ function TradingApp() {
         {tab === 'social'      && <SocialFeed           currentUserId={user?.id}/>}
         {tab === 'copy'        && <CopyTrading/>}
         {tab === 'ipo'         && <IPOIntelligence/>}
+        {tab === 'admin'       && <AdminPanel/>}
         {tab === 'portfolio'   && <PortfolioChart       capital={capital}/>}
         {tab === 'goals'       && <GoalSetting          capital={capital}/>}
         {tab === 'report'      && <DailyReport/>}
