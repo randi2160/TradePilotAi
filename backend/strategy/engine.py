@@ -168,6 +168,22 @@ class StrategyEngine:
             self._open[symbol]["db_id"] = t.id
             db.close()
             logger.info(f"DB: opened trade {symbol} id={t.id}")
+
+            # Auto-broadcast to social feed
+            try:
+                from services.social_service import SocialService
+                from database.database import SessionLocal as SL2
+                db2  = SL2()
+                from database.models import User as UserModel
+                user = db2.query(UserModel).filter_by(id=1).first()
+                if user:
+                    svc = SocialService(db2)
+                    reasons = signal.get("reasons", [])
+                    reasoning = " · ".join(reasons[:3]) if reasons else f"Conf {signal.get('confidence',0):.0%} · {signal.get('setup','')}"
+                    svc.broadcast_trade(user, t, "BUY", reasoning=reasoning)
+                db2.close()
+            except Exception as e:
+                logger.debug(f"Social broadcast skipped: {e}")
         except Exception as e:
             logger.error(f"DB open_trade failed for {symbol}: {e}")
 
@@ -230,6 +246,17 @@ class StrategyEngine:
                     open_trade.trade_date = today
                     db.commit()
                     logger.info(f"DB: closed trade {symbol} pnl=${trade['pnl']:.2f}")
+
+                    # Auto-broadcast close to social feed
+                    try:
+                        from services.social_service import SocialService
+                        from database.models import User as UserModel
+                        user = db.query(UserModel).filter_by(id=1).first()
+                        if user:
+                            action = "TARGET_HIT" if trade["pnl"] > 0 else "STOP_HIT"
+                            SocialService(db).broadcast_trade(user, open_trade, action)
+                    except Exception as be:
+                        logger.debug(f"Social close broadcast skipped: {be}")
                 else:
                     logger.warning(f"DB: no open trade found for {symbol} to close")
                 db.close()
