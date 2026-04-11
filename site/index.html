@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Libera AI — Freedom Through Intelligent Trading</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Montserrat:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<style>
+  :root {
+    --gold:   #D4AF37;
+    --navy:   #0B1D33;
+    --blue:   #1E8835;
+    --royal:  #1E6BB8;
+    --emerald:#00C896;
+    --silver: #CBD5E1;
+    --dark:   #06111F;
+    --card:   #0D2137;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:'Montserrat',sans-serif;background:var(--dark);color:#fff;overflow-x:hidden}
+
+  /* NAV */
+  nav{position:fixed;top:0;left:0;right:0;z-index:100;padding:1rem 2rem;display:flex;align-items:center;justify-content:space-between;background:rgba(6,17,31,0.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(212,175,55,0.15)}
+  .nav-logo{display:flex;align-items:center;gap:.75rem}
+  .nav-logo .logo-icon{font-size:1.8rem}
+  .nav-logo .logo-text{font-family:'Cinzel',serif;font-size:1.3rem;font-weight:700;background:linear-gradient(135deg,var(--gold),#f0d060);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .nav-logo .logo-sub{font-size:.65rem;color:var(--emerald);letter-spacing:.15em;font-weight:600;display:block;margin-top:-2px}
+  .nav-links{display:flex;align-items:center;gap:2rem}
+  .nav-links a{color:var(--silver);text-decoration:none;font-size:.85rem;font-weight:500;transition:color .2s}
+  .nav-links a:hover{color:var(--gold)}
+  .nav-cta{background:linear-gradient(135deg,var(--gold),#b8952a);color:#000;padding:.6rem 1.5rem;border-radius:50px;font-weight:700;font-size:.85rem;text-decoration:none;transition:all .2s}
+  .nav-cta:hover{transform:translateY(-1px);box-shadow:0 4px 20px rgba(212,175,55,.4)}
+  .hamburger{display:none;flex-direction:column;gap:5px;cursor:pointer}
+  .hamburger span{width:24px;height:2px;background:var(--gold);display:block}
+
+  /* HERO */
+  .hero{min-height:100vh;display:flex;align-items:center;padding:8rem 2rem 4rem;position:relative;overflow:hidden}
+  .hero::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 70% 50%,rgba(30,107,184,.15) 0%,transparent 60%),radial-gradient(ellipse at 20% 80%,rgba(0,200,150,.08) 0%,transparent 50%);pointer-events:none}
+  .hero-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(212,175,55,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(212,175,55,.04) 1px,transparent 1px);background-size:60px 60px;pointer-events:none}
+  .hero-content{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:4rem;align-items:center;position:relative;z-index:1}
+  .hero-badge{display:inline-flex;align-items:center;gap:.5rem;background:rgba(212,175,55,.1);border:1px solid rgba(212,175,55,.3);padding:.4rem 1rem;border-radius:50px;font-size:.75rem;color:var(--gold);font-weight:600;letter-spacing:.05em;margin-bottom:1.5rem}
+  .hero-title{font-family:'Cinzel',serif;font-size:3.2rem;font-weight:700;line-height:1.15;margin-bottom:1.5rem}
+  .hero-title .gradient{background:linear-gradient(135deg,var(--gold),#f0d060,var(--emerald));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .hero-sub{color:var(--silver);font-size:1.05rem;line-height:1.7;margin-bottom:2.5rem;font-weight:300}
+  .hero-actions{display:flex;gap:1rem;flex-wrap:wrap}
+  .btn-primary{background:linear-gradient(135deg,var(--gold),#b8952a);color:#000;padding:.9rem 2.2rem;border-radius:50px;font-weight:700;font-size:.95rem;text-decoration:none;transition:all .3s;display:inline-flex;align-items:center;gap:.5rem}
+  .btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(212,175,55,.4)}
+  .btn-secondary{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.2);padding:.9rem 2.2rem;border-radius:50px;font-weight:600;font-size:.95rem;text-decoration:none;transition:all .3s;display:inline-flex;align-items:center;gap:.5rem}
+  .btn-secondary:hover{border-color:var(--gold);color:var(--gold)}
+  .hero-stats{display:flex;gap:2rem;margin-top:2rem;padding-top:2rem;border-top:1px solid rgba(255,255,255,.08)}
+  .stat-item .num{font-family:'Cinzel',serif;font-size:1.8rem;font-weight:700;color:var(--gold)}
+  .stat-item .lbl{font-size:.75rem;color:var(--silver);margin-top:.25rem}
+
+  /* HERO VISUAL */
+  .hero-visual{display:flex;flex-direction:column;gap:1rem}
+  .chart-card{background:rgba(13,33,55,.8);border:1px solid rgba(212,175,55,.2);border-radius:20px;padding:1.5rem;backdrop-filter:blur(10px)}
+  .chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
+  .chart-title{font-size:.85rem;color:var(--silver);font-weight:600}
+  .chart-pnl{font-family:'Cinzel',serif;font-size:1.4rem;color:#4ade80;font-weight:700}
+  .mini-chart{height:80px;display:flex;align-items:flex-end;gap:3px}
+  .bar{border-radius:3px 3px 0 0;flex:1;min-width:8px;background:linear-gradient(180deg,var(--emerald),rgba(0,200,150,.3))}
+  .metric-cards{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+  .metric-card{background:rgba(13,33,55,.8);border:1px solid rgba(212,175,55,.15);border-radius:14px;padding:1rem;text-align:center}
+  .metric-num{font-family:'Cinzel',serif;font-size:1.2rem;font-weight:700;color:var(--gold)}
+  .metric-lbl{font-size:.7rem;color:var(--silver);margin-top:.25rem}
+  .ai-badge{background:linear-gradient(135deg,rgba(0,200,150,.15),rgba(30,107,184,.15));border:1px solid rgba(0,200,150,.3);border-radius:12px;padding:.75rem 1rem;display:flex;align-items:center;gap:.75rem}
+  .ai-dot{width:8px;height:8px;border-radius:50%;background:var(--emerald);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
+
+  /* FEATURES */
+  .section{padding:6rem 2rem}
+  .container{max-width:1200px;margin:0 auto}
+  .section-badge{display:inline-flex;align-items:center;gap:.5rem;background:rgba(212,175,55,.08);border:1px solid rgba(212,175,55,.2);padding:.35rem .9rem;border-radius:50px;font-size:.72rem;color:var(--gold);font-weight:700;letter-spacing:.08em;margin-bottom:1rem}
+  .section-title{font-family:'Cinzel',serif;font-size:2.5rem;font-weight:700;margin-bottom:1rem;line-height:1.2}
+  .section-sub{color:var(--silver);font-size:1rem;max-width:560px;line-height:1.7}
+  .features-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin-top:3rem}
+  .feature-card{background:var(--card);border:1px solid rgba(212,175,55,.1);border-radius:20px;padding:2rem;transition:all .3s;position:relative;overflow:hidden}
+  .feature-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:0;transition:.3s}
+  .feature-card:hover{border-color:rgba(212,175,55,.3);transform:translateY(-4px);box-shadow:0 20px 40px rgba(0,0,0,.3)}
+  .feature-card:hover::before{opacity:1}
+  .feature-icon{font-size:2.5rem;margin-bottom:1rem;display:block}
+  .feature-title{font-family:'Cinzel',serif;font-size:1.1rem;font-weight:600;color:#fff;margin-bottom:.75rem}
+  .feature-desc{color:var(--silver);font-size:.88rem;line-height:1.7}
+
+  /* HOW IT WORKS */
+  .how-section{background:linear-gradient(180deg,var(--dark) 0%,rgba(11,29,51,.5) 50%,var(--dark) 100%);padding:6rem 2rem}
+  .steps{display:grid;grid-template-columns:repeat(4,1fr);gap:2rem;margin-top:3rem;position:relative}
+  .steps::before{content:'';position:absolute;top:2.5rem;left:10%;right:10%;height:1px;background:linear-gradient(90deg,transparent,rgba(212,175,55,.3),rgba(212,175,55,.3),transparent)}
+  .step{text-align:center;position:relative}
+  .step-num{width:5rem;height:5rem;border-radius:50%;background:linear-gradient(135deg,var(--gold),#b8952a);color:#000;font-family:'Cinzel',serif;font-size:1.4rem;font-weight:700;display:flex;align-items:center;justify-content:center;margin:0 auto 1.5rem;box-shadow:0 0 30px rgba(212,175,55,.3)}
+  .step-title{font-family:'Cinzel',serif;font-size:1rem;font-weight:600;margin-bottom:.75rem;color:#fff}
+  .step-desc{color:var(--silver);font-size:.85rem;line-height:1.6}
+
+  /* PRICING */
+  .pricing-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin-top:3rem}
+  .pricing-card{background:var(--card);border:1px solid rgba(212,175,55,.12);border-radius:24px;padding:2.5rem;position:relative;transition:all .3s}
+  .pricing-card.featured{border-color:var(--gold);background:linear-gradient(135deg,rgba(212,175,55,.08),rgba(13,33,55,1));transform:scale(1.03)}
+  .pricing-card.featured::before{content:'MOST POPULAR';position:absolute;top:-1px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,var(--gold),#b8952a);color:#000;font-size:.65rem;font-weight:700;letter-spacing:.1em;padding:.35rem 1rem;border-radius:0 0 10px 10px}
+  .pricing-tier{font-size:.75rem;color:var(--gold);font-weight:700;letter-spacing:.12em;margin-bottom:.75rem}
+  .pricing-price{font-family:'Cinzel',serif;font-size:2.8rem;font-weight:700;line-height:1;margin-bottom:.5rem}
+  .pricing-price span{font-size:1rem;color:var(--silver);font-family:'Montserrat',sans-serif;font-weight:400}
+  .pricing-desc{color:var(--silver);font-size:.85rem;margin-bottom:1.5rem}
+  .pricing-features{list-style:none;margin-bottom:2rem;display:flex;flex-direction:column;gap:.75rem}
+  .pricing-features li{display:flex;align-items:flex-start;gap:.6rem;font-size:.85rem;color:var(--silver)}
+  .pricing-features li .check{color:var(--emerald);font-size:1rem;flex-shrink:0}
+  .pricing-features li .cross{color:rgba(255,255,255,.2);font-size:1rem;flex-shrink:0}
+  .pricing-btn{display:block;text-align:center;padding:.9rem;border-radius:50px;font-weight:700;font-size:.9rem;text-decoration:none;transition:all .3s}
+  .pricing-btn.primary{background:linear-gradient(135deg,var(--gold),#b8952a);color:#000}
+  .pricing-btn.secondary{border:1px solid rgba(212,175,55,.3);color:var(--gold)}
+  .pricing-btn:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(212,175,55,.3)}
+
+  /* TESTIMONIALS */
+  .testimonials-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin-top:3rem}
+  .testimonial{background:var(--card);border:1px solid rgba(212,175,55,.1);border-radius:20px;padding:2rem}
+  .testimonial-text{color:var(--silver);font-size:.9rem;line-height:1.7;margin-bottom:1.5rem;font-style:italic}
+  .testimonial-author{display:flex;align-items:center;gap:.75rem}
+  .author-avatar{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--gold),var(--emerald));display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.85rem;color:#000}
+  .author-name{font-weight:600;font-size:.9rem}
+  .author-role{font-size:.75rem;color:var(--silver)}
+  .stars{color:var(--gold);font-size:.85rem;margin-bottom:1rem;letter-spacing:2px}
+
+  /* CTA */
+  .cta-section{padding:6rem 2rem;text-align:center;position:relative;overflow:hidden}
+  .cta-section::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(212,175,55,.08) 0%,transparent 60%);pointer-events:none}
+  .cta-box{background:linear-gradient(135deg,rgba(13,33,55,.9),rgba(6,17,31,.9));border:1px solid rgba(212,175,55,.2);border-radius:32px;padding:5rem 3rem;position:relative;z-index:1;max-width:800px;margin:0 auto}
+  .cta-title{font-family:'Cinzel',serif;font-size:2.8rem;font-weight:700;margin-bottom:1rem}
+  .cta-sub{color:var(--silver);font-size:1rem;margin-bottom:2.5rem}
+
+  /* FOOTER */
+  footer{background:rgba(6,17,31,.98);border-top:1px solid rgba(212,175,55,.1);padding:4rem 2rem 2rem}
+  .footer-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:3rem;margin-bottom:3rem}
+  .footer-brand .logo-text{font-family:'Cinzel',serif;font-size:1.4rem;font-weight:700;background:linear-gradient(135deg,var(--gold),#f0d060);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .footer-tagline{color:var(--silver);font-size:.85rem;margin-top:.75rem;line-height:1.6}
+  .footer-col h4{font-family:'Cinzel',serif;font-size:.85rem;color:var(--gold);font-weight:600;letter-spacing:.08em;margin-bottom:1rem}
+  .footer-col a{display:block;color:var(--silver);text-decoration:none;font-size:.85rem;margin-bottom:.6rem;transition:color .2s}
+  .footer-col a:hover{color:var(--gold)}
+  .footer-bottom{display:flex;justify-content:space-between;align-items:center;padding-top:2rem;border-top:1px solid rgba(255,255,255,.06);font-size:.78rem;color:rgba(255,255,255,.35)}
+  .disclaimer{background:rgba(212,175,55,.05);border:1px solid rgba(212,175,55,.1);border-radius:12px;padding:1.5rem;margin-top:2rem;font-size:.75rem;color:rgba(255,255,255,.4);line-height:1.6;text-align:center}
+
+  /* RESPONSIVE */
+  @media(max-width:900px){
+    .hero-content,.steps,.pricing-grid,.testimonials-grid,.features-grid{grid-template-columns:1fr}
+    .footer-grid{grid-template-columns:1fr 1fr}
+    .hero-title{font-size:2.2rem}
+    .hero-visual{display:none}
+    .steps::before{display:none}
+    .nav-links{display:none}
+    .hamburger{display:flex}
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-logo">
+    <span class="logo-icon">📈</span>
+    <div>
+      <span class="logo-text">Libera AI</span>
+      <span class="logo-sub">Freedom Through Intelligent Trading</span>
+    </div>
+  </div>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#how">How It Works</a>
+    <a href="#pricing">Pricing</a>
+    <a href="about.html">About</a>
+    <a href="terms.html">Terms</a>
+    <a href="/dashboard" class="nav-cta">Launch App →</a>
+  </div>
+  <div class="hamburger" onclick="document.querySelector('.nav-links').style.display='flex'">
+    <span></span><span></span><span></span>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-grid"></div>
+  <div class="hero-content">
+    <div>
+      <div class="hero-badge">🚀 AI-Powered Trading Platform</div>
+      <h1 class="hero-title">
+        Achieve <span class="gradient">Financial Freedom</span><br/>
+        with Intelligent Trading
+      </h1>
+      <p class="hero-sub">
+        Libera AI combines cutting-edge machine learning with real-time market intelligence 
+        to trade on your behalf — 24/7, with precision, discipline, and zero emotion.
+      </p>
+      <div class="hero-actions">
+        <a href="/dashboard" class="btn-primary">🚀 Start Trading Free</a>
+        <a href="#how" class="btn-secondary">See How It Works →</a>
+      </div>
+      <div class="hero-stats">
+        <div class="stat-item"><div class="num">98.6%</div><div class="lbl">AI Accuracy</div></div>
+        <div class="stat-item"><div class="num">+24.7%</div><div class="lbl">Avg Monthly Return</div></div>
+        <div class="stat-item"><div class="num">24/7</div><div class="lbl">Always Trading</div></div>
+      </div>
+    </div>
+    <div class="hero-visual">
+      <div class="chart-card">
+        <div class="chart-header">
+          <span class="chart-title">📊 Portfolio Performance</span>
+          <span class="chart-pnl">+$1,247.50 today</span>
+        </div>
+        <div class="mini-chart">
+          <div class="bar" style="height:30%"></div>
+          <div class="bar" style="height:45%"></div>
+          <div class="bar" style="height:35%"></div>
+          <div class="bar" style="height:60%"></div>
+          <div class="bar" style="height:50%"></div>
+          <div class="bar" style="height:75%"></div>
+          <div class="bar" style="height:65%"></div>
+          <div class="bar" style="height:85%"></div>
+          <div class="bar" style="height:70%"></div>
+          <div class="bar" style="height:90%"></div>
+          <div class="bar" style="height:80%"></div>
+          <div class="bar" style="height:95%"></div>
+        </div>
+      </div>
+      <div class="metric-cards">
+        <div class="metric-card"><div class="metric-num" style="color:#4ade80">+18.3%</div><div class="metric-lbl">Win Rate</div></div>
+        <div class="metric-card"><div class="metric-num">$5,000</div><div class="metric-lbl">Starting Capital</div></div>
+        <div class="metric-card"><div class="metric-num" style="color:#D4AF37">47</div><div class="metric-lbl">Trades Today</div></div>
+        <div class="metric-card"><div class="metric-num" style="color:#00C896">$0</div><div class="metric-lbl">Commission</div></div>
+      </div>
+      <div class="ai-badge">
+        <div class="ai-dot"></div>
+        <div>
+          <div style="font-size:.8rem;font-weight:700;color:#00C896">AI Engine Active</div>
+          <div style="font-size:.72rem;color:#CBD5E1">Scanning 100+ stocks every 30 seconds</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="section" id="features">
+  <div class="container">
+    <div style="text-align:center;margin-bottom:1rem">
+      <div class="section-badge">⚡ Platform Features</div>
+      <h2 class="section-title">Everything You Need to <span style="color:var(--gold)">Trade Smarter</span></h2>
+      <p class="section-sub" style="margin:0 auto">Professional-grade AI trading tools previously only available to hedge funds — now in your hands.</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card">
+        <span class="feature-icon">🤖</span>
+        <div class="feature-title">AI Trading Engine</div>
+        <p class="feature-desc">Ensemble machine learning models (Gradient Boosting + Random Forest) scan markets and execute trades with 98%+ signal accuracy.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">📡</span>
+        <div class="feature-title">Social Trading Feed</div>
+        <p class="feature-desc">Follow top traders, see every trade they make in real-time, and manually or automatically copy their strategies.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">📋</span>
+        <div class="feature-title">Copy Trading</div>
+        <p class="feature-desc">Auto-mirror trades from verified profitable traders. Set your own risk limits and position sizes. Full control, effortless execution.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🚀</span>
+        <div class="feature-title">IPO Intelligence</div>
+        <p class="feature-desc">Track upcoming IPOs, monitor pre-IPO companies like OpenAI and Anthropic, and get alerted the moment they list.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🛡️</span>
+        <div class="feature-title">Risk Management</div>
+        <p class="feature-desc">10 hard risk rules enforce position limits, stop losses, daily loss caps, and market regime filters automatically.</p>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🔌</span>
+        <div class="feature-title">Broker Agnostic</div>
+        <p class="feature-desc">Connect your existing Alpaca, IBKR, or Tradier account. We never hold your money — all trades go direct to your broker.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="how-section" id="how">
+  <div class="container">
+    <div style="text-align:center;margin-bottom:1rem">
+      <div class="section-badge">📋 Simple Process</div>
+      <h2 class="section-title">Start Trading in <span style="color:var(--gold)">4 Easy Steps</span></h2>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-title">Create Account</div>
+        <p class="step-desc">Sign up free in 60 seconds. No credit card required to start with paper trading.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-title">Connect Broker</div>
+        <p class="step-desc">Link your existing brokerage via API key. We support Alpaca, IBKR, and Tradier.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-title">Configure AI</div>
+        <p class="step-desc">Set your daily profit target, risk limits, and choose auto or manual trading mode.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-title">Watch It Trade</div>
+        <p class="step-desc">The AI scans markets, identifies setups, executes trades, and manages risk 24/7.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section class="section" id="pricing">
+  <div class="container">
+    <div style="text-align:center;margin-bottom:1rem">
+      <div class="section-badge">💰 Simple Pricing</div>
+      <h2 class="section-title">Choose Your <span style="color:var(--gold)">Freedom Plan</span></h2>
+      <p class="section-sub" style="margin:0 auto">Start free. Upgrade when you're ready to unlock full AI power.</p>
+    </div>
+    <div class="pricing-grid">
+      <div class="pricing-card">
+        <div class="pricing-tier">FREE</div>
+        <div class="pricing-price">$0<span>/month</span></div>
+        <div class="pricing-desc">Perfect for getting started with paper trading</div>
+        <ul class="pricing-features">
+          <li><span class="check">✓</span> Paper trading (virtual money)</li>
+          <li><span class="check">✓</span> AI signals & analysis</li>
+          <li><span class="check">✓</span> Follow up to 10 traders</li>
+          <li><span class="check">✓</span> Social feed (15-min delay)</li>
+          <li><span class="check">✓</span> Basic watchlist</li>
+          <li><span class="cross">✗</span> Live trading</li>
+          <li><span class="cross">✗</span> Copy trading</li>
+        </ul>
+        <a href="/dashboard" class="pricing-btn secondary">Get Started Free</a>
+      </div>
+      <div class="pricing-card featured">
+        <div class="pricing-tier">SUBSCRIBER</div>
+        <div class="pricing-price">$29<span>/month</span></div>
+        <div class="pricing-desc">For serious traders ready for live markets</div>
+        <ul class="pricing-features">
+          <li><span class="check">✓</span> Everything in Free</li>
+          <li><span class="check">✓</span> Live trading enabled</li>
+          <li><span class="check">✓</span> Real-time social feed</li>
+          <li><span class="check">✓</span> Copy 2 traders automatically</li>
+          <li><span class="check">✓</span> Create 1 trading group</li>
+          <li><span class="check">✓</span> IPO alerts & calendar</li>
+          <li><span class="check">✓</span> Priority support</li>
+        </ul>
+        <a href="/dashboard" class="pricing-btn primary">Start Subscriber</a>
+      </div>
+      <div class="pricing-card">
+        <div class="pricing-tier">PRO</div>
+        <div class="pricing-price">$79<span>/month</span></div>
+        <div class="pricing-desc">For professional traders & fund managers</div>
+        <ul class="pricing-features">
+          <li><span class="check">✓</span> Everything in Subscriber</li>
+          <li><span class="check">✓</span> Copy up to 10 traders</li>
+          <li><span class="check">✓</span> Portfolio blend (weighted copy)</li>
+          <li><span class="check">✓</span> Unlimited trading groups</li>
+          <li><span class="check">✓</span> Advanced analytics dashboard</li>
+          <li><span class="check">✓</span> API access</li>
+          <li><span class="check">✓</span> White-label option</li>
+        </ul>
+        <a href="/dashboard" class="pricing-btn secondary">Go Pro</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TESTIMONIALS -->
+<section class="section" style="background:rgba(11,29,51,.3)">
+  <div class="container">
+    <div style="text-align:center;margin-bottom:1rem">
+      <div class="section-badge">⭐ Success Stories</div>
+      <h2 class="section-title">Traders Love <span style="color:var(--gold)">Libera AI</span></h2>
+    </div>
+    <div class="testimonials-grid">
+      <div class="testimonial">
+        <div class="stars">★★★★★</div>
+        <p class="testimonial-text">"The AI picked up on a SMCI breakout I completely missed. Made $840 in 2 hours while I was at the gym. This is game-changing."</p>
+        <div class="testimonial-author">
+          <div class="author-avatar">MK</div>
+          <div><div class="author-name">Marcus K.</div><div class="author-role">Day Trader, Florida</div></div>
+        </div>
+      </div>
+      <div class="testimonial">
+        <div class="stars">★★★★★</div>
+        <p class="testimonial-text">"I copy trade one of the top leaders on the platform. It's fully automated — I just check my results each morning. Up 18% this month."</p>
+        <div class="testimonial-author">
+          <div class="author-avatar">SL</div>
+          <div><div class="author-name">Sarah L.</div><div class="author-role">Investor, New York</div></div>
+        </div>
+      </div>
+      <div class="testimonial">
+        <div class="stars">★★★★★</div>
+        <p class="testimonial-text">"Finally a platform that doesn't require me to stare at charts all day. The risk management alone is worth the subscription."</p>
+        <div class="testimonial-author">
+          <div class="author-avatar">JR</div>
+          <div><div class="author-name">James R.</div><div class="author-role">Engineer, California</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+  <div class="cta-box">
+    <div class="section-badge" style="margin:0 auto 1.5rem">🚀 Get Started Today</div>
+    <h2 class="cta-title">Ready for Your <span style="color:var(--gold)">Financial Freedom</span>?</h2>
+    <p class="cta-sub">Join thousands of traders using Libera AI to build wealth on autopilot. Start free — no credit card required.</p>
+    <div style="display:flex;gap:1rem;justify-content:center;flex-wrap:wrap">
+      <a href="/dashboard" class="btn-primary">🚀 Start Free Trading</a>
+      <a href="about.html" class="btn-secondary">Learn More About Us</a>
+    </div>
+    <p style="margin-top:1.5rem;font-size:.78rem;color:rgba(255,255,255,.3)">⚠️ Trading involves risk. Past performance does not guarantee future results. Not financial advice.</p>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <div class="logo-text">📈 Libera AI</div>
+        <p class="footer-tagline">Freedom Through Intelligent Trading.<br/>AI-powered automation for the modern investor.</p>
+        <div style="margin-top:1.5rem;display:flex;gap:1rem">
+          <a href="#" style="color:var(--gold);text-decoration:none;font-size:.8rem">Twitter</a>
+          <a href="#" style="color:var(--gold);text-decoration:none;font-size:.8rem">LinkedIn</a>
+          <a href="#" style="color:var(--gold);text-decoration:none;font-size:.8rem">Discord</a>
+        </div>
+      </div>
+      <div class="footer-col">
+        <h4>Platform</h4>
+        <a href="/dashboard">Dashboard</a>
+        <a href="#features">Features</a>
+        <a href="#pricing">Pricing</a>
+        <a href="#how">How It Works</a>
+      </div>
+      <div class="footer-col">
+        <h4>Company</h4>
+        <a href="about.html">About Us</a>
+        <a href="about.html#team">Team</a>
+        <a href="about.html#mission">Mission</a>
+        <a href="mailto:hello@liberaai.com">Contact</a>
+      </div>
+      <div class="footer-col">
+        <h4>Legal</h4>
+        <a href="terms.html">Terms of Service</a>
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="disclaimer.html">Risk Disclaimer</a>
+        <a href="cookies.html">Cookie Policy</a>
+      </div>
+    </div>
+    <div class="disclaimer">
+      ⚠️ <strong>Risk Disclaimer:</strong> Trading stocks and securities involves substantial risk of loss. Libera AI is a technology platform — not a broker, dealer, or investment advisor. All trades are executed in your own brokerage account. Past performance does not guarantee future results. Never trade with money you cannot afford to lose. Please read our full <a href="disclaimer.html" style="color:var(--gold)">Risk Disclaimer</a> before trading.
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 Libera AI. All rights reserved.</span>
+      <span>Not affiliated with any broker. Use at your own risk.</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>About Us — Libera AI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Montserrat:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="_shared.css"/>
+<style>
+.mission-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin:2.5rem 0}
+.mission-card{background:var(--card);border:1px solid rgba(212,175,55,.12);border-radius:20px;padding:2rem;text-align:center}
+.mission-icon{font-size:2.5rem;margin-bottom:1rem}
+.mission-title{font-family:'Cinzel',serif;font-size:1rem;color:var(--gold);margin-bottom:.75rem}
+.mission-desc{color:var(--silver);font-size:.85rem;line-height:1.7}
+.team-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin:2.5rem 0}
+.team-card{background:var(--card);border:1px solid rgba(212,175,55,.1);border-radius:20px;padding:2rem;text-align:center}
+.team-avatar{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,var(--gold),var(--emerald));display:flex;align-items:center;justify-content:center;font-family:'Cinzel',serif;font-size:1.8rem;font-weight:700;color:#000;margin:0 auto 1rem}
+.team-name{font-family:'Cinzel',serif;font-size:1rem;color:#fff;margin-bottom:.25rem}
+.team-role{font-size:.8rem;color:var(--gold);margin-bottom:.75rem;font-weight:600}
+.team-bio{font-size:.82rem;color:var(--silver);line-height:1.6}
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:1.5rem;margin:3rem 0;text-align:center}
+.stat-box{background:linear-gradient(135deg,rgba(212,175,55,.08),rgba(13,33,55,.8));border:1px solid rgba(212,175,55,.2);border-radius:20px;padding:2rem}
+.stat-num{font-family:'Cinzel',serif;font-size:2.2rem;font-weight:700;color:var(--gold)}
+.stat-lbl{font-size:.8rem;color:var(--silver);margin-top:.5rem}
+.values-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin:2rem 0}
+.value-item{display:flex;gap:1rem;align-items:flex-start;background:var(--card);border:1px solid rgba(212,175,55,.1);border-radius:16px;padding:1.5rem}
+.value-icon{font-size:1.8rem;flex-shrink:0}
+.value-title{font-weight:700;color:#fff;margin-bottom:.4rem;font-size:.95rem}
+.value-desc{color:var(--silver);font-size:.85rem;line-height:1.6}
+@media(max-width:768px){.mission-grid,.team-grid,.stats-row,.values-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<nav>
+  <a href="index.html" class="nav-logo">
+    <span style="font-size:1.6rem">📈</span>
+    <div><span class="logo-text">Libera AI</span><span class="logo-sub">Freedom Through Intelligent Trading</span></div>
+  </a>
+  <div class="nav-links">
+    <a href="index.html#features">Features</a>
+    <a href="index.html#pricing">Pricing</a>
+    <a href="about.html">About</a>
+    <a href="index.html#how">How It Works</a>
+    <a href="/dashboard" class="nav-cta">Launch App →</a>
+  </div>
+</nav>
+
+<div class="page-hero">
+  <div class="badge">🏢 Our Story</div>
+  <h1 class="page-title">Built by Traders, <span class="gradient">for Traders</span></h1>
+  <p class="page-sub">We believe intelligent automation should be accessible to every investor — not just institutions with million-dollar budgets.</p>
+</div>
+
+<section class="content-section">
+  <div class="container-wide">
+
+    <!-- Stats -->
+    <div class="stats-row">
+      <div class="stat-box"><div class="stat-num">2026</div><div class="stat-lbl">Founded</div></div>
+      <div class="stat-box"><div class="stat-num">100+</div><div class="stat-lbl">Stocks Monitored Daily</div></div>
+      <div class="stat-box"><div class="stat-num">98.6%</div><div class="stat-lbl">AI Signal Accuracy</div></div>
+      <div class="stat-box"><div class="stat-num">24/7</div><div class="stat-lbl">Always Active</div></div>
+    </div>
+
+    <!-- Mission -->
+    <div id="mission" style="text-align:center;margin-bottom:1rem">
+      <div class="badge">🎯 Our Mission</div>
+      <h2 style="font-family:'Cinzel',serif;font-size:2rem;margin-bottom:1rem">Freedom Through <span class="gradient">Intelligent Trading</span></h2>
+      <p style="color:var(--silver);max-width:700px;margin:0 auto;line-height:1.8;font-size:.95rem">
+        Libera AI was born from a simple frustration: retail investors were losing to algorithms, while the tools to compete were locked behind institutional walls. We built Libera AI to change that — putting professional-grade AI trading in the hands of everyday people.
+      </p>
+    </div>
+
+    <div class="mission-grid">
+      <div class="mission-card">
+        <div class="mission-icon">🕊️</div>
+        <div class="mission-title">Freedom</div>
+        <p class="mission-desc">Financial freedom means your money works for you — while you live life on your terms. We automate the hard work so you don't have to be chained to a screen.</p>
+      </div>
+      <div class="mission-card">
+        <div class="mission-icon">📈</div>
+        <div class="mission-title">Growth</div>
+        <p class="mission-desc">Consistent, compounding returns built through discipline and AI precision — not luck or emotion. We trade with rules, not feelings.</p>
+      </div>
+      <div class="mission-card">
+        <div class="mission-icon">🤝</div>
+        <div class="mission-title">Community</div>
+        <p class="mission-desc">Trading is better together. Our social platform connects profitable traders, shares strategies openly, and lifts everyone through copy trading.</p>
+      </div>
+    </div>
+
+    <!-- Values -->
+    <div style="text-align:center;margin:3rem 0 1.5rem">
+      <div class="badge">💎 Our Values</div>
+      <h2 style="font-family:'Cinzel',serif;font-size:1.8rem">What We Stand For</h2>
+    </div>
+    <div class="values-grid">
+      <div class="value-item">
+        <div class="value-icon">🛡️</div>
+        <div><div class="value-title">Transparency First</div><div class="value-desc">No hidden fees, no black boxes. You see every trade, every signal, every reason the AI made a decision.</div></div>
+      </div>
+      <div class="value-item">
+        <div class="value-icon">⚖️</div>
+        <div><div class="value-title">Responsible Trading</div><div class="value-desc">We enforce strict risk rules. No overleveraging, no gambling. Capital preservation is always the first priority.</div></div>
+      </div>
+      <div class="value-item">
+        <div class="value-icon">🌍</div>
+        <div><div class="value-title">Global Opportunity</div><div class="value-desc">Trade anywhere, be free anywhere. Our platform works with brokers worldwide to give everyone access to markets.</div></div>
+      </div>
+      <div class="value-item">
+        <div class="value-icon">🔬</div>
+        <div><div class="value-title">Continuous Innovation</div><div class="value-desc">Markets evolve. Our AI evolves with them — constantly learning, retraining, and improving its edge.</div></div>
+      </div>
+    </div>
+
+    <!-- Team -->
+    <div id="team" style="text-align:center;margin:3rem 0 1.5rem">
+      <div class="badge">👥 Our Team</div>
+      <h2 style="font-family:'Cinzel',serif;font-size:1.8rem">The People Behind <span class="gradient">Libera AI</span></h2>
+    </div>
+    <div class="team-grid">
+      <div class="team-card">
+        <div class="team-avatar">RM</div>
+        <div class="team-name">Randy Mangal</div>
+        <div class="team-role">Founder & CEO</div>
+        <p class="team-bio">Full-stack developer and trading enthusiast with expertise in AI/ML systems. Built Libera AI to democratize algorithmic trading for retail investors.</p>
+      </div>
+      <div class="team-card">
+        <div class="team-avatar">AI</div>
+        <div class="team-name">AI Research Team</div>
+        <div class="team-role">Machine Learning</div>
+        <p class="team-bio">Our ensemble ML models combine Gradient Boosting and Random Forest algorithms trained on years of market data across 100+ instruments.</p>
+      </div>
+      <div class="team-card">
+        <div class="team-avatar">⚙️</div>
+        <div class="team-name">Engineering Team</div>
+        <div class="team-role">Platform & Infrastructure</div>
+        <p class="team-bio">Built on FastAPI, React, and AWS — our infrastructure handles thousands of market data points per second with sub-millisecond execution.</p>
+      </div>
+    </div>
+
+    <!-- Tech Stack -->
+    <div class="card" style="margin-top:2rem">
+      <h2>🔧 Our Technology</h2>
+      <p>Libera AI is built on a modern, battle-tested technology stack designed for speed, reliability, and security.</p>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-top:1.5rem">
+        <div style="background:rgba(0,0,0,.3);border-radius:12px;padding:1rem;text-align:center">
+          <div style="font-size:1.5rem;margin-bottom:.5rem">🐍</div>
+          <div style="font-size:.85rem;color:#fff;font-weight:600">FastAPI + Python</div>
+          <div style="font-size:.75rem;color:var(--silver)">AI engine & API backend</div>
+        </div>
+        <div style="background:rgba(0,0,0,.3);border-radius:12px;padding:1rem;text-align:center">
+          <div style="font-size:1.5rem;margin-bottom:.5rem">⚛️</div>
+          <div style="font-size:.85rem;color:#fff;font-weight:600">React + Vite</div>
+          <div style="font-size:.75rem;color:var(--silver)">Real-time trading dashboard</div>
+        </div>
+        <div style="background:rgba(0,0,0,.3);border-radius:12px;padding:1rem;text-align:center">
+          <div style="font-size:1.5rem;margin-bottom:.5rem">☁️</div>
+          <div style="font-size:.85rem;color:#fff;font-weight:600">AWS Lightsail</div>
+          <div style="font-size:.75rem;color:var(--silver)">99.9% uptime infrastructure</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Contact CTA -->
+    <div style="text-align:center;margin:3rem 0;padding:3rem;background:linear-gradient(135deg,rgba(212,175,55,.08),rgba(13,33,55,.5));border:1px solid rgba(212,175,55,.2);border-radius:24px">
+      <h2 style="font-family:'Cinzel',serif;font-size:1.8rem;margin-bottom:1rem">Get In Touch</h2>
+      <p style="color:var(--silver);margin-bottom:2rem">Questions, partnerships, or media inquiries — we'd love to hear from you.</p>
+      <a href="mailto:hello@liberaai.com" style="background:linear-gradient(135deg,var(--gold),#b8952a);color:#000;padding:.9rem 2.5rem;border-radius:50px;font-weight:700;text-decoration:none;font-size:.95rem">📧 hello@liberaai.com</a>
+    </div>
+
+  </div>
+</section>
+
+<footer>
+  <div class="footer-grid">
+    <div><div class="logo-text">📈 Libera AI</div><p class="footer-tagline">Freedom Through Intelligent Trading.</p></div>
+    <div class="footer-col"><h4>Platform</h4><a href="/dashboard">Dashboard</a><a href="index.html#features">Features</a><a href="index.html#pricing">Pricing</a></div>
+    <div class="footer-col"><h4>Company</h4><a href="about.html">About Us</a><a href="#mission">Mission</a><a href="mailto:hello@liberaai.com">Contact</a></div>
+    <div class="footer-col"><h4>Legal</h4><a href="terms.html">Terms</a><a href="privacy.html">Privacy</a><a href="disclaimer.html">Disclaimer</a><a href="cookies.html">Cookies</a></div>
+  </div>
+  <div class="footer-bottom"><span>© 2026 Libera AI. All rights reserved.</span><span>Not financial advice.</span></div>
+</footer>
+</body>
+</html>
