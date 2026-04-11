@@ -3,21 +3,21 @@ import { AuthProvider, useAuth } from './hooks/useAuth'
 import { useWebSocket }          from './hooks/useWebSocket'
 import { getTrades, addSymbol }  from './services/api'
 
-import LoginPage       from './components/LoginPage'
-import Dashboard       from './components/Dashboard'
-import ChartView       from './components/ChartView'
-import BotControls     from './components/BotControls'
-import TradeLog        from './components/TradeLog'
-import Signals         from './components/Signals'
-import PortfolioChart  from './components/PortfolioChart'
-import NewsPanel       from './components/NewsPanel'
-import MarketScanner   from './components/MarketScanner'
-import Settings        from './components/Settings'
-import AIAdvisor       from './components/AIAdvisor'
-import AutoManualToggle from './components/AutoManualToggle'
-import UserProfile     from './components/UserProfile'
-import ManualTrade     from './components/ManualTrade'
-import Performance     from './components/Performance'
+import LoginPage            from './components/LoginPage'
+import Dashboard            from './components/Dashboard'
+import ChartView            from './components/ChartView'
+import BotControls          from './components/BotControls'
+import TradeLog             from './components/TradeLog'
+import Signals              from './components/Signals'
+import PortfolioChart       from './components/PortfolioChart'
+import NewsPanel            from './components/NewsPanel'
+import MarketScanner        from './components/MarketScanner'
+import Settings             from './components/Settings'
+import AIAdvisor            from './components/AIAdvisor'
+import AutoManualToggle     from './components/AutoManualToggle'
+import UserProfile          from './components/UserProfile'
+import ManualTrade          from './components/ManualTrade'
+import Performance          from './components/Performance'
 import PeakBounce           from './components/PeakBounce'
 import DualEngineDashboard  from './components/DualEngineDashboard'
 import GoalSetting          from './components/GoalSetting'
@@ -26,29 +26,31 @@ import MarketIntelligence   from './components/MarketIntelligence'
 import LiveTicker           from './components/LiveTicker'
 import BrokerManager        from './components/BrokerManager'
 import ActivityLog          from './components/ActivityLog'
+import SocialFeed           from './components/SocialFeed'
 
 const TABS = [
-  { id: 'dashboard',   label: '📊', full: 'Dashboard'   },
-  { id: 'ai',          label: '🧠', full: 'AI Advisor'   },
-  { id: 'portfolio',   label: '💰', full: 'Portfolio'    },
-  { id: 'goals',       label: '🎯', full: 'Goals'        },
-  { id: 'report',      label: '📄', full: 'Daily Report' },
-  { id: 'activity',    label: '📡', full: 'Activity Log' },
-  { id: 'intel',       label: '🔬', full: 'Intelligence' },
-  { id: 'performance', label: '🏆', full: 'Performance'  },
-  { id: 'bounce',      label: '📉', full: 'Peak Bounce'  },
-  { id: 'dual',        label: '⚡', full: 'Dual Engine'  },
-  { id: 'chart',       label: '📈', full: 'Charts'       },
-  { id: 'scanner',     label: '🔍', full: 'Scanner'      },
-  { id: 'news',        label: '📰', full: 'News'         },
-  { id: 'signals',     label: '🤖', full: 'Signals'      },
-  { id: 'trades',      label: '📋', full: 'Trades'       },
-  { id: 'manual',      label: '✋', full: 'Manual Trade' },
-  { id: 'mode',        label: '⚡', full: 'Auto/Manual'  },
-  { id: 'bot',         label: '⚙️', full: 'Bot'          },
-  { id: 'broker',      label: '🔌', full: 'My Broker'    },
-  { id: 'settings',    label: '🛠️', full: 'Settings'     },
-  { id: 'profile',     label: '👤', full: 'Profile'      },
+  { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
+  { id: 'ai',          label: '🧠', full: 'AI Advisor'    },
+  { id: 'social',      label: '👥', full: 'Social'        },
+  { id: 'portfolio',   label: '💰', full: 'Portfolio'     },
+  { id: 'goals',       label: '🎯', full: 'Goals'         },
+  { id: 'report',      label: '📄', full: 'Daily Report'  },
+  { id: 'activity',    label: '📡', full: 'Activity'      },
+  { id: 'intel',       label: '🔬', full: 'Intelligence'  },
+  { id: 'performance', label: '🏆', full: 'Performance'   },
+  { id: 'bounce',      label: '📉', full: 'Peak Bounce'   },
+  { id: 'dual',        label: '⚡', full: 'Dual Engine'   },
+  { id: 'chart',       label: '📈', full: 'Charts'        },
+  { id: 'scanner',     label: '🔍', full: 'Scanner'       },
+  { id: 'news',        label: '📰', full: 'News'          },
+  { id: 'signals',     label: '🤖', full: 'Signals'       },
+  { id: 'trades',      label: '📋', full: 'Trades'        },
+  { id: 'manual',      label: '✋', full: 'Manual Trade'  },
+  { id: 'mode',        label: '🔀', full: 'Auto/Manual'   },
+  { id: 'bot',         label: '⚙️', full: 'Bot'           },
+  { id: 'broker',      label: '🔌', full: 'My Broker'     },
+  { id: 'settings',    label: '🛠️', full: 'Settings'      },
+  { id: 'profile',     label: '👤', full: 'Profile'       },
 ]
 
 function TradingApp() {
@@ -70,16 +72,14 @@ function TradingApp() {
     return () => clearInterval(iv)
   }, [token])
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-dark-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-4xl mb-3 animate-pulse">📈</div>
-          <p className="text-gray-400">Loading AutoTrader Pro…</p>
-        </div>
+  if (loading) return (
+    <div className="min-h-screen bg-dark-900 flex items-center justify-center">
+      <div className="text-center">
+        <div className="text-4xl mb-3 animate-pulse">📈</div>
+        <p className="text-gray-400">Loading AutoTrader Pro…</p>
       </div>
-    )
-  }
+    </div>
+  )
 
   if (!user) return <LoginPage />
 
@@ -178,6 +178,7 @@ function TradingApp() {
       <main className="flex-1 max-w-screen-xl w-full mx-auto p-4 md:p-6 overflow-auto">
         {tab === 'dashboard'   && <div className="space-y-5"><PortfolioChart capital={capital}/><Dashboard data={data}/></div>}
         {tab === 'ai'          && <AIAdvisor           onAddToWatchlist={handleAddToWatchlist}/>}
+        {tab === 'social'      && <SocialFeed           currentUserId={user?.id}/>}
         {tab === 'portfolio'   && <PortfolioChart       capital={capital}/>}
         {tab === 'goals'       && <GoalSetting          capital={capital}/>}
         {tab === 'report'      && <DailyReport/>}
