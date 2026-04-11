@@ -71,7 +71,17 @@ class StrategyEngine:
         elif signal["signal"] in ("BUY", "SELL") and \
                 signal["confidence"] >= config.MIN_CONFIDENCE_SCORE and \
                 symbol not in self._open:
+            logger.info(
+                f"🎯 Entry candidate: {symbol} {signal['signal']} "
+                f"conf={signal['confidence']:.2f} price=${signal['price']:.2f}"
+            )
             await self._enter(symbol, signal, df)
+        elif signal["signal"] in ("BUY", "SELL"):
+            logger.debug(
+                f"Signal {signal['signal']} {symbol} blocked: "
+                f"conf={signal['confidence']:.2f} < {config.MIN_CONFIDENCE_SCORE} threshold"
+                f"{' (already open)' if symbol in self._open else ''}"
+            )
 
         return signal
 
@@ -125,8 +135,42 @@ class StrategyEngine:
             "take_profit": sizing["take_profit"],
             "signal":      signal,
             "order_id":    order.get("id"),
+            "db_id":       None,   # filled below
         }
         self.tracker.record_open(symbol, price, sizing["qty"], side)
+
+        # ── Save opening trade to DB ──────────────────────────────────────
+        try:
+            from database.database import SessionLocal
+            from database.models   import Trade as TradeModel
+            from datetime import datetime as dt
+            db    = SessionLocal()
+            today = str(datetime.now(ET).date())
+            t = TradeModel(
+                user_id       = 1,   # default user; extend for multi-user
+                symbol        = symbol,
+                side          = side,
+                qty           = sizing["qty"],
+                entry_price   = price,
+                stop_loss     = sizing["stop_loss"],
+                take_profit   = sizing["take_profit"],
+                confidence    = signal.get("confidence", 0),
+                risk_dollars  = sizing.get("risk_dollars", 0),
+                position_value= round(price * sizing["qty"], 2),
+                order_id      = order.get("id", ""),
+                status        = "open",
+                trade_date    = today,
+                opened_at     = dt.utcnow(),
+            )
+            db.add(t)
+            db.commit()
+            db.refresh(t)
+            self._open[symbol]["db_id"] = t.id
+            db.close()
+            logger.info(f"DB: opened trade {symbol} id={t.id}")
+        except Exception as e:
+            logger.error(f"DB open_trade failed for {symbol}: {e}")
+
         logger.info(
             f"ENTER {side} {sizing['qty']}x{symbol} @ {price:.2f} | "
             f"SL={sizing['stop_loss']} TP={sizing['take_profit']} | "
@@ -157,6 +201,41 @@ class StrategyEngine:
             del self._open[symbol]
             logger.info(f"EXIT {symbol} @ {price:.2f} | {exit_reason} | PnL=${trade['pnl']:.2f}")
 
+            # ── Persist closed trade to DB ────────────────────────────────
+            try:
+                from database.database import SessionLocal
+                from database.models   import Trade as TradeModel
+                from datetime import datetime as dt
+                db       = SessionLocal()
+                db_id    = pos.get("db_id")
+                today    = str(datetime.now(ET).date())
+
+                # Find by db_id first, fall back to symbol lookup
+                if db_id:
+                    open_trade = db.query(TradeModel).filter(
+                        TradeModel.id == db_id
+                    ).first()
+                else:
+                    open_trade = db.query(TradeModel).filter(
+                        TradeModel.symbol == symbol,
+                        TradeModel.status == "open",
+                    ).order_by(TradeModel.opened_at.desc()).first()
+
+                if open_trade:
+                    open_trade.exit_price = price
+                    open_trade.status     = "closed"
+                    open_trade.closed_at  = dt.utcnow()
+                    open_trade.pnl        = round(trade["pnl"], 2)
+                    open_trade.pnl_pct    = round(trade.get("pnl_pct", 0), 2)
+                    open_trade.trade_date = today
+                    db.commit()
+                    logger.info(f"DB: closed trade {symbol} pnl=${trade['pnl']:.2f}")
+                else:
+                    logger.warning(f"DB: no open trade found for {symbol} to close")
+                db.close()
+            except Exception as e:
+                logger.error(f"DB close_trade failed for {symbol}: {e}")
+
     # ── End-of-day flat ───────────────────────────────────────────────────────
 
     async def close_all_eod(self):
@@ -164,7 +243,33 @@ class StrategyEngine:
         for symbol in list(self._open.keys()):
             price = self.broker.get_latest_price(symbol)
             self.broker.close_position(symbol)
-            self.tracker.record_close(symbol, price)
+            trade = self.tracker.record_close(symbol, price)
+
+            # Save to DB
+            try:
+                from database.database import SessionLocal
+                from database.models   import Trade as TradeModel
+                from datetime import datetime as dt
+                db     = SessionLocal()
+                db_id  = self._open[symbol].get("db_id")
+                today  = str(datetime.now(ET).date())
+                rec    = db.query(TradeModel).filter(
+                    TradeModel.id == db_id if db_id else False
+                ).first() or db.query(TradeModel).filter(
+                    TradeModel.symbol == symbol,
+                    TradeModel.status == "open",
+                ).order_by(TradeModel.opened_at.desc()).first()
+                if rec:
+                    rec.exit_price = price
+                    rec.status     = "closed"
+                    rec.closed_at  = dt.utcnow()
+                    rec.pnl        = round(trade.get("pnl", 0), 2)
+                    rec.trade_date = today
+                    db.commit()
+                db.close()
+            except Exception as e:
+                logger.error(f"DB EOD close failed for {symbol}: {e}")
+
             del self._open[symbol]
             logger.info(f"EOD close: {symbol} @ {price:.2f}")
 
