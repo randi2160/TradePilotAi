@@ -30,6 +30,7 @@ import SocialFeed           from './components/SocialFeed'
 import CopyTrading          from './components/CopyTrading'
 import IPOIntelligence      from './components/IPOIntelligence'
 import AdminPanel          from './components/AdminPanel'
+import SafetyControls      from './components/SafetyControls'
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
@@ -53,6 +54,7 @@ const TABS = [
   { id: 'manual',      label: '✋', full: 'Manual Trade'  },
   { id: 'mode',        label: '🔀', full: 'Auto/Manual'   },
   { id: 'bot',         label: '⚙️', full: 'Bot'           },
+  { id: 'safety',      label: '🛡️', full: 'Safety'        },
   { id: 'broker',      label: '🔌', full: 'My Broker'     },
   { id: 'settings',    label: '🛠️', full: 'Settings'      },
   { id: 'profile',     label: '👤', full: 'Profile'       },
@@ -188,6 +190,7 @@ function TradingApp() {
         {tab === 'copy'        && <CopyTrading/>}
         {tab === 'ipo'         && <IPOIntelligence/>}
         {tab === 'admin'       && <AdminPanel/>}
+        {tab === 'safety'      && <SafetyControls botStatus={data?.bot_status ?? 'stopped'} onStatusChange={() => {}}/>}
         {tab === 'portfolio'   && <PortfolioChart       capital={capital}/>}
         {tab === 'goals'       && <GoalSetting          capital={capital}/>}
         {tab === 'report'      && <DailyReport/>}
