@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Environment — NEVER commit these
+.env
+.env.local
+.env.production
+*.env
+
+# Database — contains real trade data
+*.db
+*.sqlite
+*.sqlite3
+
+# Node
+node_modules/
+dist/
+.parcel-cache/
+
+# Build outputs
+build/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Sensitive
+*.pem
+*.key
+*.cert
+secrets/
