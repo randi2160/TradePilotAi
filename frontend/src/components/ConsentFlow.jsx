@@ -236,176 +236,118 @@ function SuitabilityStep({ onNext, onBack, setSuitabilityData }) {
   )
 }
 
-// ── Step 3: Risk Disclosure ───────────────────────────────────────────────────
-function RiskStep({ onNext, onBack }) {
+// ── Reusable DB-Driven Document Step ─────────────────────────────────────────
+function DocStep({ docType, title, stepDesc, checkText, acceptLabel, onNext, onBack }) {
+  const [doc,     setDoc]     = useState(null)
+  const [loading, setLoading] = useState(true)
   const [read,    setRead]    = useState(false)
   const [checked, setChecked] = useState(false)
-  const [scrolled, setScrolled] = useState(false)
 
-  function handleScroll(e) {
-    const el = e.target
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20) {
-      setRead(true)
-    }
-  }
-
-  return (
-    <div className="space-y-5">
-      <div>
-        <h2 className="text-xl font-black text-white mb-1">Risk Disclosure</h2>
-        <p className="text-gray-500 text-sm">Please read the following disclosure carefully and scroll to the bottom before continuing.</p>
-      </div>
-
-      <div onScroll={handleScroll}
-        className="h-72 overflow-y-auto bg-dark-700 border border-dark-600 rounded-xl p-4 text-sm text-gray-300 leading-relaxed space-y-3">
-        <h3 className="font-bold text-white text-base">Risk Disclosure Statement</h3>
-
-        <p><strong className="text-yellow-400">IMPORTANT — PLEASE READ CAREFULLY BEFORE TRADING</strong></p>
-
-        <p><strong className="text-white">1. Trading Involves Substantial Risk of Loss</strong><br/>
-        Trading stocks, securities, and any financial instruments involves substantial risk of loss and is not suitable for all investors. You may lose some or all of your invested capital. Never trade with money you cannot afford to lose entirely.</p>
-
-        <p><strong className="text-white">2. Morviq AI is Not a Financial Advisor</strong><br/>
-        Morviq AI is a software technology platform. We are not a registered broker-dealer, investment advisor, or financial planner. Nothing on this platform constitutes financial advice, investment advice, or a recommendation to buy or sell any security.</p>
-
-        <p><strong className="text-white">3. Past Performance Does Not Guarantee Future Results</strong><br/>
-        Any historical performance data, win rates, or return figures displayed on the platform are for informational purposes only. Past performance of any algorithm, strategy, or trader does not guarantee similar results in the future. Markets change constantly and unpredictably.</p>
-
-        <p><strong className="text-white">4. Automated Trading Risks</strong><br/>
-        Automated trading algorithms can malfunction, make incorrect decisions, or perform poorly in certain market conditions. Software bugs, internet outages, exchange connectivity issues, or unexpected market events can cause erroneous trades or inability to close positions. You accept full responsibility for all outcomes.</p>
-
-        <p><strong className="text-white">5. Copy Trading Risks</strong><br/>
-        Copying another trader's strategy does not guarantee similar results. Differences in trade execution timing, slippage, available capital, and market conditions can result in significantly different outcomes for your account compared to the leader you copy.</p>
-
-        <p><strong className="text-white">6. You Are Solely Responsible</strong><br/>
-        You are solely responsible for all trading decisions, outcomes, and losses that occur in your brokerage account. Morviq AI executes trades only within the limits and rules you configure. By enabling automated trading, you authorize the platform to execute trades on your behalf within those limits.</p>
-
-        <p><strong className="text-white">7. Tax Implications</strong><br/>
-        Trading activities may have significant tax implications. Morviq AI does not provide tax advice. Consult a qualified tax professional.</p>
-
-        <p><strong className="text-white">8. Pattern Day Trader Rule</strong><br/>
-        If you have less than $25,000 in your brokerage account, you are subject to Pattern Day Trader (PDT) restrictions. Violating PDT rules can result in your account being restricted. You are responsible for compliance.</p>
-
-        <p><strong className="text-white">9. No Guarantee of Platform Availability</strong><br/>
-        The platform may experience downtime, maintenance, or technical failures. Morviq AI is not liable for any trading losses that occur due to platform unavailability.</p>
-
-        <p><strong className="text-white">10. Seek Professional Advice</strong><br/>
-        Before trading, we strongly encourage you to consult a licensed financial advisor about whether trading is appropriate for your personal financial situation. Only invest money you can afford to lose entirely.</p>
-
-        <p className="text-gray-500 italic">Last updated: April 2026 — Morviq AI</p>
-      </div>
-
-      {!read && (
-        <p className="text-xs text-yellow-400 text-center">↑ Scroll to the bottom to continue</p>
-      )}
-
-      <label className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer transition-all ${
-        read ? 'bg-dark-700 border-dark-600 hover:border-brand-500/40' : 'opacity-40 pointer-events-none bg-dark-800 border-dark-700'
-      }`}>
-        <input type="checkbox" checked={checked} onChange={e => setChecked(e.target.checked)}
-          disabled={!read} className="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-500"/>
-        <div className="text-sm text-gray-300">
-          <strong className="text-white">I have read and understand the Risk Disclosure Statement.</strong>
-          {' '}I acknowledge that trading involves substantial risk of loss and that past performance does not guarantee future results. I understand that Morviq AI is not a financial advisor and that I am solely responsible for all trading decisions and outcomes.
-        </div>
-      </label>
-
-      <div className="flex gap-3">
-        <button onClick={onBack} className="flex items-center gap-2 px-5 py-2.5 bg-dark-700 text-gray-400 hover:text-white border border-dark-600 rounded-xl text-sm">
-          <ChevronLeft size={14}/> Back
-        </button>
-        <button onClick={onNext} disabled={!checked || !read}
-          className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-brand-500 hover:bg-brand-600 text-dark-900 font-bold rounded-xl text-sm disabled:opacity-40 disabled:cursor-not-allowed">
-          I Understand the Risks <ChevronRight size={14}/>
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── Step 4: Terms of Service ──────────────────────────────────────────────────
-function TermsStep({ onNext, onBack }) {
-  const [read,    setRead]    = useState(false)
-  const [checked, setChecked] = useState(false)
+  useEffect(() => {
+    api.get(`/admin/legal/${docType}/active`)
+      .then(r => { setDoc(r.data); setLoading(false) })
+      .catch(() => { setDoc(null); setLoading(false) })
+  }, [docType])
 
   function handleScroll(e) {
     const el = e.target
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20) setRead(true)
   }
 
+  const canProceed = checked && read && !!doc
+
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-xl font-black text-white mb-1">Terms of Service</h2>
-        <p className="text-gray-500 text-sm">Please read and accept our Terms of Service to continue.</p>
+        <h2 className="text-xl font-black text-white mb-1">{title}</h2>
+        <p className="text-gray-500 text-sm">{stepDesc}</p>
+        {doc && (
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-xs text-gray-600">Version: {doc.version}</span>
+            <span className="text-xs text-gray-700">·</span>
+            <span className="text-xs font-mono text-gray-700">{doc.content_hash?.slice(0,12)}…</span>
+          </div>
+        )}
       </div>
 
-      <div onScroll={handleScroll}
-        className="h-72 overflow-y-auto bg-dark-700 border border-dark-600 rounded-xl p-4 text-sm text-gray-300 leading-relaxed space-y-3">
-        <h3 className="font-bold text-white text-base">Morviq AI — Terms of Service</h3>
-        <p className="text-gray-500">Version 2026-04-11</p>
+      {loading ? (
+        <div className="h-72 flex items-center justify-center">
+          <div className="animate-spin w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full"/>
+        </div>
+      ) : !doc ? (
+        <div className="h-72 bg-red-900/20 border-2 border-red-800/40 rounded-xl p-6 flex flex-col items-center justify-center gap-3">
+          <div className="text-3xl">⚠️</div>
+          <div className="text-center">
+            <p className="text-red-400 font-bold text-sm">Document Not Configured</p>
+            <p className="text-xs text-red-300/70 mt-1 leading-relaxed">
+              The <strong>{docType}</strong> document has not been added yet.<br/>
+              An administrator must add it in <strong>Admin Panel → Legal Docs</strong> before users can proceed.
+            </p>
+          </div>
+        </div>
+      ) : (
+        <div
+          onScroll={handleScroll}
+          className="h-72 overflow-y-auto bg-dark-700 border border-dark-600 rounded-xl p-4 text-sm text-gray-300 leading-relaxed"
+          dangerouslySetInnerHTML={{ __html: doc.content }}
+        />
+      )}
 
-        <p><strong className="text-white">1. Acceptance</strong><br/>
-        By using Morviq AI, you agree to be bound by these Terms. If you do not agree, do not use the platform.</p>
-
-        <p><strong className="text-white">2. Description of Service</strong><br/>
-        Morviq AI provides AI-powered automated trading software that connects to third-party brokerage accounts. We are NOT a broker, dealer, or investment advisor. All trades execute in your own brokerage account.</p>
-
-        <p><strong className="text-white">3. Eligibility</strong><br/>
-        You must be at least 18 years of age and legally permitted to trade securities in your jurisdiction.</p>
-
-        <p><strong className="text-white">4. User Responsibilities</strong><br/>
-        You are responsible for: (a) maintaining the security of your account credentials; (b) all trading outcomes in your brokerage account; (c) compliance with all applicable laws and regulations; (d) accuracy of information provided to us.</p>
-
-        <p><strong className="text-white">5. Automated Trading Authorization</strong><br/>
-        By enabling automated trading, you explicitly authorize Morviq AI to place, manage, and close trades in your brokerage account within the risk limits you configure. You may revoke this authorization at any time by disabling the bot.</p>
-
-        <p><strong className="text-white">6. Subscriptions and Payments</strong><br/>
-        Paid plans are billed monthly. Cancellations take effect at the end of the billing period. No refunds for partial months. All prices are in USD.</p>
-
-        <p><strong className="text-white">7. Prohibited Uses</strong><br/>
-        You may not: (a) violate securities laws or engage in market manipulation; (b) share account access with unauthorized persons; (c) attempt to reverse-engineer or hack the platform; (d) use the platform to engage in fraudulent activity.</p>
-
-        <p><strong className="text-white">8. Limitation of Liability</strong><br/>
-        To the maximum extent permitted by law, Morviq AI shall not be liable for any trading losses, lost profits, or indirect damages. Our total liability shall not exceed fees paid in the preceding 3 months.</p>
-
-        <p><strong className="text-white">9. Indemnification</strong><br/>
-        You agree to indemnify Morviq AI against all claims arising from your use of the platform or violation of these Terms.</p>
-
-        <p><strong className="text-white">10. Changes</strong><br/>
-        We may update these Terms. Material changes will be communicated via email or in-app notification. Continued use constitutes acceptance.</p>
-
-        <p><strong className="text-white">11. Governing Law</strong><br/>
-        These Terms are governed by the laws of the United States. Disputes shall be resolved through binding arbitration.</p>
-
-        <p className="text-gray-500 italic">For questions: legal@morviqai.com</p>
-      </div>
-
-      {!read && <p className="text-xs text-yellow-400 text-center">↑ Scroll to the bottom to continue</p>}
+      {!read && doc && (
+        <p className="text-xs text-yellow-400 text-center">↑ Scroll to the bottom to continue</p>
+      )}
 
       <label className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer transition-all ${
-        read ? 'bg-dark-700 border-dark-600 hover:border-brand-500/40' : 'opacity-40 pointer-events-none bg-dark-800 border-dark-700'
+        read && doc ? 'bg-dark-700 border-dark-600 hover:border-brand-500/40' : 'opacity-40 pointer-events-none bg-dark-800 border-dark-700'
       }`}>
         <input type="checkbox" checked={checked} onChange={e => setChecked(e.target.checked)}
-          disabled={!read} className="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-500"/>
-        <div className="text-sm text-gray-300">
-          <strong className="text-white">I have read and agree to the Terms of Service.</strong>
-          {' '}I understand that Morviq AI is a software platform, not a financial advisor, and that I am solely responsible for all trading activity in my account.
-        </div>
+          disabled={!read || !doc} className="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-500"/>
+        <div className="text-sm text-gray-300">{checkText}</div>
       </label>
 
       <div className="flex gap-3">
         <button onClick={onBack} className="flex items-center gap-2 px-5 py-2.5 bg-dark-700 text-gray-400 hover:text-white border border-dark-600 rounded-xl text-sm">
           <ChevronLeft size={14}/> Back
         </button>
-        <button onClick={onNext} disabled={!checked || !read}
+        <button onClick={onNext} disabled={!canProceed}
           className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-brand-500 hover:bg-brand-600 text-dark-900 font-bold rounded-xl text-sm disabled:opacity-40 disabled:cursor-not-allowed">
-          Accept Terms <ChevronRight size={14}/>
+          {acceptLabel || 'Accept & Continue'} <ChevronRight size={14}/>
         </button>
       </div>
     </div>
   )
 }
+
+// ── Step 3: Risk Disclosure (DB-driven) ───────────────────────────────────────
+function RiskStep({ onNext, onBack }) {
+  return (
+    <DocStep
+      docType="risk"
+      title="Risk Disclosure"
+      stepDesc="Please read the risk disclosure carefully and scroll to the bottom before continuing."
+      checkText="I have read and understand the Risk Disclosure Statement. I acknowledge that trading involves substantial risk of loss, that past performance does not guarantee future results, and that Morviq AI is not a financial advisor. I am solely responsible for all trading decisions and outcomes."
+      acceptLabel="I Understand the Risks"
+      onNext={onNext}
+      onBack={onBack}
+    />
+  )
+}
+
+// ── Step 4: Terms of Service (DB-driven) ──────────────────────────────────────
+function TermsStep({ onNext, onBack }) {
+  return (
+    <DocStep
+      docType="tos"
+      title="Terms of Service"
+      stepDesc="Please read and accept our Terms of Service to continue."
+      checkText="I have read and agree to the Terms of Service. I understand that Morviq AI is a software platform, not a financial advisor, and that I am solely responsible for all trading activity in my account."
+      acceptLabel="Accept Terms"
+      onNext={onNext}
+      onBack={onBack}
+    />
+  )
+}
+
 
 // ── Step 5: Auto-Trading Consent ──────────────────────────────────────────────
 const AUTO_CONSENTS = [
@@ -413,8 +355,9 @@ const AUTO_CONSENTS = [
   { id: 'my_rules',       text: 'I understand the AI only trades within the specific rules and limits I configure — it does not act freely' },
   { id: 'not_advisor',    text: 'I understand Morviq AI is software, not a financial advisor. It does not provide investment advice.' },
   { id: 'may_lose',       text: 'I understand I can lose real money — including losing all of the money I put in — and I accept this risk' },
+  { id: 'no_approval',    text: 'I understand automated trading may execute trades WITHOUT asking me for approval on each trade, once enabled' },
   { id: 'can_disable',    text: 'I know I can stop all trading immediately at any time using the Safety tab — I am always in control' },
-  { id: 'responsibility', text: 'I accept full legal responsibility for all trades that execute in my brokerage account through this platform' },
+  { id: 'responsibility', text: 'I remain responsible for all profits, losses, and account activity regardless of how trades are executed' },
 ]
 
 function AutoTradingStep({ onNext, onBack }) {

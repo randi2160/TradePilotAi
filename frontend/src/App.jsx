@@ -32,6 +32,7 @@ import AdminPanel          from './components/AdminPanel'
 import SafetyControls      from './components/SafetyControls'
 import ConsentFlow         from './components/ConsentFlow'
 import SymbolPage          from './components/SymbolPage'
+import StockBoard         from './components/StockBoard'
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
@@ -69,15 +70,19 @@ function TradingApp() {
   const [needsConsent, setNeedsConsent] = useState(null)
   const [trades,       setTrades]       = useState([])
   const [activeSymbol, setActiveSymbol] = useState(null)
+  const [boardSymbol,  setBoardSymbol]  = useState(null)
 
   useEffect(() => {
     const handler = (e) => setTab(e.detail)
     window.addEventListener('navigate', handler)
     const symHandler = (e) => setActiveSymbol(e.detail)
     window.addEventListener('openSymbol', symHandler)
+    const boardHandler = (e) => { setBoardSymbol(e.detail); setActiveSymbol(null) }
+    window.addEventListener('openSymbolFullPage', boardHandler)
     return () => {
       window.removeEventListener('navigate', handler)
       window.removeEventListener('openSymbol', symHandler)
+      window.removeEventListener('openSymbolFullPage', boardHandler)
     }
   }, [])
 
@@ -115,6 +120,15 @@ function TradingApp() {
 
   if (needsConsent) return (
     <ConsentFlow user={user} onComplete={() => setNeedsConsent(false)}/>
+  )
+
+  // Full-page stock board — takes over entire screen
+  if (boardSymbol) return (
+    <StockBoard
+      symbol={boardSymbol}
+      currentUserId={user?.id}
+      onBack={() => setBoardSymbol(null)}
+    />
   )
 
   const pnl         = data?.total_pnl ?? data?.realized_pnl ?? 0

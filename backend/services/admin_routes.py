@@ -47,9 +47,10 @@ async def admin_dashboard(
     total_trades  = db.query(Trade).count()
     today         = str(datetime.utcnow().date())
     trades_today  = db.query(Trade).filter(Trade.trade_date == today).count()
-    live_users    = db.query(User).filter(
-        getattr(User, "live_mode_enabled", False) == True
-    ).count() if hasattr(User, "live_mode_enabled") else 0
+    try:
+        live_users = db.query(User).filter(User.live_mode_enabled == True).count()
+    except Exception:
+        live_users = 0
 
     recent_logs = db.query(AuditLog).filter(
         AuditLog.severity.in_(["warning", "critical"])

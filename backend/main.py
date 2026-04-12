@@ -667,10 +667,13 @@ class SymbolBody(BaseModel):
 @app.post("/api/watchlist/add",         tags=["Watchlist"])
 async def add_symbol(body: SymbolBody, user: User = Depends(get_current_user)):
     settings.add_symbol(body.symbol)
-    bot_loop.refresh_watchlist()   # sync immediately
+    try:
+        bot_loop.refresh_watchlist()
+    except Exception as e:
+        logger.warning(f"refresh_watchlist failed (bot may not be running): {e}")
     wl = settings.get_watchlist()
     logger.info(f"Symbol {body.symbol.upper()} added. Watchlist now: {wl}")
-    return {"watchlist": wl, "added": body.symbol.upper()}
+    return {"watchlist": wl, "added": body.symbol.upper(), "status": "saved"}
 
 @app.delete("/api/watchlist/{symbol}",  tags=["Watchlist"])
 async def remove_symbol(symbol: str, user: User = Depends(get_current_user)):
@@ -1045,28 +1048,36 @@ async def ai_symbol_sentiment(
         from data.vwap              import get_vwap_signal
 
         if not bot_loop.broker:
-            # Fallback when bot not running — use price only
-            price = body.get("price") or 0
-            change = body.get("change_pct") or 0
-            return {
-                "symbol":    symbol,
-                "signal":    "HOLD",
-                "sentiment": "neutral",
-                "score":     50,
-                "confidence": 45,
-                "reasoning": "Start the bot to enable full AI analysis with live chart data.",
-                "entry":     None,
-                "exit":      None,
-                "stop":      None,
-                "risk_reward": None,
-                "indicators": {},
-                "key_levels": {},
-            }
+            # Try standalone client
+            try:
+                from broker.alpaca_client import AlpacaClient
+                import config as _cfg
+                if _cfg.ALPACA_API_KEY:
+                    _broker = AlpacaClient(_cfg.ALPACA_API_KEY,
+                                           getattr(_cfg, 'ALPACA_SECRET_KEY', ''),
+                                           getattr(_cfg, 'ALPACA_MODE', 'paper'))
+                else:
+                    raise Exception("No API key")
+            except Exception:
+                price = body.get("price") or 0
+                change = body.get("change_pct") or 0
+                return {
+                    "symbol":    symbol,
+                    "signal":    "HOLD",
+                    "sentiment": "neutral",
+                    "score":     50,
+                    "confidence": 45,
+                    "reasoning": "Connect your broker API keys to enable full live AI analysis with real chart data.",
+                    "entry":     None, "exit": None, "stop": None, "risk_reward": None,
+                    "indicators": {}, "key_levels": {},
+                }
+        else:
+            _broker = bot_loop.broker
 
         # Get bars at multiple timeframes
-        df1  = bot_loop.broker.get_bars(symbol, "1Min",  50)
-        df5  = bot_loop.broker.get_bars(symbol, "5Min",  100)
-        spy  = bot_loop.broker.get_bars("SPY",  "5Min",  50)
+        df1  = _broker.get_bars(symbol, "1Min",  50)
+        df5  = _broker.get_bars(symbol, "5Min",  100)
+        spy  = _broker.get_bars("SPY",  "5Min",  50)
 
         if df5.empty:
             raise HTTPException(400, f"No data for {symbol}")
@@ -1184,11 +1195,30 @@ async def get_symbol_bars(
     limit:     int = 200,
     user:      User = Depends(get_current_user)
 ):
-    """Get OHLCV bars for charting. Returns list of {time, open, high, low, close, volume}."""
-    if not bot_loop.broker:
+    """Get OHLCV bars for charting — works with or without bot running."""
+    import pandas as pd
+    from datetime import datetime, timezone, timedelta
+
+    def _get_broker():
+        if bot_loop.broker:
+            return bot_loop.broker
+        # Standalone client when bot not running
+        try:
+            from broker.alpaca_client import AlpacaClient
+            import config
+            if config.ALPACA_API_KEY:
+                return AlpacaClient(config.ALPACA_API_KEY,
+                                    getattr(config, 'ALPACA_SECRET_KEY', ''),
+                                    getattr(config, 'ALPACA_MODE', 'paper'))
+        except Exception:
+            pass
+        return None
+
+    broker = _get_broker()
+    if not broker:
         return []
     try:
-        df = bot_loop.broker.get_bars(symbol.upper(), timeframe, limit)
+        df = broker.get_bars(symbol.upper(), timeframe, limit)
         if df.empty:
             return []
         df = df.reset_index()
@@ -1196,10 +1226,11 @@ async def get_symbol_bars(
         for _, row in df.iterrows():
             ts = row.get("timestamp", row.get("index", ""))
             try:
-                import pandas as pd
                 t = int(pd.Timestamp(ts).timestamp())
             except:
                 t = 0
+            if t == 0:
+                continue
             out.append({
                 "time":   t,
                 "open":   round(float(row.get("open",  0)), 4),

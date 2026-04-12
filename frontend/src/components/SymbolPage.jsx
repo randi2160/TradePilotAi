@@ -118,188 +118,217 @@ function LiveChart({ symbol, height = 320 }) {
 }
 
 // ── AI Strategy Panel ─────────────────────────────────────────────────────────
-function AIStrategy({ symbol, price, compact = false }) {
-  const [data,     setData]     = useState(null)
-  const [loading,  setLoading]  = useState(false)
+function AIStrategy({ symbol, price }) {
+  const [data,      setData]      = useState(null)
+  const [loading,   setLoading]   = useState(false)
   const [lastRefresh, setLastRefresh] = useState(null)
+  const [showSetup, setShowSetup] = useState(false)
+  const [order,     setOrder]     = useState({ buyAt: '', stopAt: '', exitAt: '', qty: '' })
+  const [orderMsg,  setOrderMsg]  = useState('')
 
   const analyze = useCallback(async () => {
     setLoading(true)
     try {
-      const r = await api.post('/ai/symbol-sentiment', {
-        symbol,
-        price:      price?.price,
-        change_pct: price?.change_pct,
-      })
+      const r = await api.post('/ai/symbol-sentiment', { symbol, price: price?.price, change_pct: price?.change_pct })
       setData(r.data)
       setLastRefresh(new Date())
+      if (r.data.entry) setOrder(o => ({ ...o, buyAt: r.data.entry||'', stopAt: r.data.stop||'', exitAt: r.data.exit||'' }))
     } catch {
-      // fallback
       const change = price?.change_pct || 0
+      const p = price?.price || 0
+      const atr = p * 0.015
       setData({
-        signal:     change > 2 ? 'BUY' : change < -2 ? 'SELL' : 'HOLD',
-        sentiment:  change > 1.5 ? 'bullish' : change < -1.5 ? 'bearish' : 'neutral',
-        score:      Math.round(50 + change * 6),
-        confidence: Math.round(50 + Math.abs(change) * 4),
-        reasoning:  `${symbol} is ${change >= 0 ? 'up' : 'down'} ${Math.abs(change).toFixed(2)}% today. ` +
-                    (change > 1.5 ? 'Momentum is positive.' : change < -1.5 ? 'Selling pressure elevated.' : 'Consolidating — wait for direction.'),
-        entry: price?.price ? price.price.toFixed(2) : null,
-        exit:  price?.price ? (price.price * (change > 0 ? 1.03 : 0.97)).toFixed(2) : null,
-        stop:  price?.price ? (price.price * (change > 0 ? 0.98 : 1.02)).toFixed(2) : null,
-        risk_reward: '2.0',
-        indicators: {},
-        key_levels: {
-          support:    price?.price ? (price.price * 0.97).toFixed(2) : '—',
-          resistance: price?.price ? (price.price * 1.03).toFixed(2) : '—',
-        },
+        signal: change > 2 ? 'BUY' : change < -2 ? 'SELL' : 'HOLD',
+        sentiment: change > 1.5 ? 'bullish' : change < -1.5 ? 'bearish' : 'neutral',
+        score: Math.round(50 + change * 6), confidence: Math.round(50 + Math.abs(change) * 4),
+        reasoning: `${symbol} is ${change >= 0 ? 'up' : 'down'} ${Math.abs(change).toFixed(2)}% today. ` +
+                   (change > 1.5 ? 'Momentum is positive — watch for continuation.' : change < -1.5 ? 'Selling pressure elevated — wait for stabilization.' : 'Consolidating — wait for a directional move.'),
+        entry: p ? p.toFixed(2) : null,
+        exit:  p ? (p + atr * 2).toFixed(2) : null,
+        stop:  p ? (p - atr * 1.5).toFixed(2) : null,
+        risk_reward: '1.3', indicators: {},
+        key_levels: { support: p ? (p*0.97).toFixed(2) : '—', resistance: p ? (p*1.03).toFixed(2) : '—' },
       })
       setLastRefresh(new Date())
     } finally { setLoading(false) }
   }, [symbol, price])
 
   useEffect(() => {
-    if (price) analyze()
-    const iv = setInterval(analyze, 60000) // refresh every minute
+    const iv = setInterval(analyze, 60000)
     return () => clearInterval(iv)
   }, [symbol])
 
-  const SIG_STYLE = {
+  const SIG = {
     BUY:  'bg-green-900/30 border-green-600 text-green-400',
     SELL: 'bg-red-900/30   border-red-600   text-red-400',
     HOLD: 'bg-yellow-900/30 border-yellow-600 text-yellow-400',
   }
 
-  if (loading && !data) return (
-    <div className="flex items-center gap-2 p-4 text-xs text-gray-500">
-      <RefreshCw size={12} className="animate-spin"/> Running AI analysis…
-    </div>
-  )
-
-  if (!data) return null
-
   return (
-    <div className="space-y-3">
-      {/* Signal header */}
-      <div className="flex items-center gap-3">
-        <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 font-black text-xl ${SIG_STYLE[data.signal] || SIG_STYLE.HOLD}`}>
-          {data.signal === 'BUY' ? '🟢' : data.signal === 'SELL' ? '🔴' : '🟡'} {data.signal}
-        </div>
-        <div className="flex-1">
-          <div className="flex items-center gap-2">
-            <span className={`text-xs px-2 py-0.5 rounded-full border font-bold ${
-              data.sentiment === 'bullish' ? 'text-green-400 bg-green-900/20 border-green-800/40' :
-              data.sentiment === 'bearish' ? 'text-red-400 bg-red-900/20 border-red-800/40' :
-              'text-gray-400 bg-dark-700 border-dark-600'
-            }`}>
-              {data.sentiment === 'bullish' ? '🟢 Bullish' : data.sentiment === 'bearish' ? '🔴 Bearish' : '⚪ Neutral'}
-            </span>
-            <span className="text-xs text-gray-500">{data.confidence}% confidence</span>
-          </div>
-          <div className="text-xs text-gray-600 mt-0.5">
-            AI Score: {data.score}/100
-            {lastRefresh && ` · Updated ${lastRefresh.toLocaleTimeString()}`}
-          </div>
-        </div>
-        <button onClick={analyze} disabled={loading}
-          className="p-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-500 hover:text-white">
-          <RefreshCw size={12} className={loading ? 'animate-spin' : ''}/>
+    <div className="space-y-4">
+      {/* Run Analysis button */}
+      {!data && !loading && (
+        <button onClick={analyze}
+          className="w-full flex items-center justify-center gap-2 py-3 bg-brand-500 hover:bg-brand-600 text-dark-900 font-bold rounded-xl text-sm">
+          <Brain size={16}/> Run AI Analysis
         </button>
-      </div>
-
-      {/* Score bar */}
-      <div className="space-y-1">
-        <div className="flex justify-between text-xs text-gray-600">
-          <span>Bearish 0</span><span>Neutral 50</span><span>100 Bullish</span>
-        </div>
-        <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
-          <div className={`h-full rounded-full transition-all duration-500 ${
-            data.score > 60 ? 'bg-green-500' : data.score < 40 ? 'bg-red-500' : 'bg-yellow-500'
-          }`} style={{ width: `${Math.max(3, Math.min(97, data.score))}%` }}/>
-        </div>
-      </div>
-
-      {/* Entry / Exit / Stop */}
-      {data.entry && (
-        <div className="grid grid-cols-3 gap-2">
-          <div className="bg-brand-500/10 border border-brand-500/30 rounded-xl p-2.5 text-center">
-            <div className="text-xs text-gray-500 flex items-center justify-center gap-1">
-              <Target size={10}/> Entry
-            </div>
-            <div className="text-sm font-black text-brand-400 mt-0.5">${data.entry}</div>
-          </div>
-          <div className="bg-green-900/15 border border-green-800/30 rounded-xl p-2.5 text-center">
-            <div className="text-xs text-gray-500 flex items-center justify-center gap-1">
-              <TrendingUp size={10}/> Target
-            </div>
-            <div className="text-sm font-black text-green-400 mt-0.5">${data.exit}</div>
-          </div>
-          <div className="bg-red-900/15 border border-red-800/30 rounded-xl p-2.5 text-center">
-            <div className="text-xs text-gray-500 flex items-center justify-center gap-1">
-              <Shield size={10}/> Stop
-            </div>
-            <div className="text-sm font-black text-red-400 mt-0.5">${data.stop}</div>
-          </div>
+      )}
+      {loading && !data && (
+        <div className="flex items-center justify-center gap-2 py-6 text-sm text-gray-500">
+          <RefreshCw size={14} className="animate-spin"/> Analyzing {symbol}…
         </div>
       )}
 
-      {/* R:R */}
-      {data.risk_reward && (
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-gray-500">Risk/Reward:</span>
-          <span className={`font-bold ${parseFloat(data.risk_reward) >= 2 ? 'text-green-400' : 'text-yellow-400'}`}>
-            1:{data.risk_reward}
-          </span>
-          {parseFloat(data.risk_reward) >= 2 && <span className="text-green-400">✓ Good setup</span>}
+      {data && (<>
+        {/* Signal */}
+        <div className="flex items-center gap-3">
+          <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 font-black text-xl ${SIG[data.signal]||SIG.HOLD}`}>
+            {data.signal==='BUY'?'🟢':data.signal==='SELL'?'🔴':'🟡'} {data.signal}
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`text-xs px-2 py-0.5 rounded-full border font-bold ${data.sentiment==='bullish'?'text-green-400 bg-green-900/20 border-green-800/40':data.sentiment==='bearish'?'text-red-400 bg-red-900/20 border-red-800/40':'text-gray-400 bg-dark-700 border-dark-600'}`}>
+                {data.sentiment==='bullish'?'🟢 Bullish':data.sentiment==='bearish'?'🔴 Bearish':'⚪ Neutral'}
+              </span>
+              <span className="text-xs text-gray-500">{data.confidence}% confidence</span>
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">Score: {data.score}/100 {lastRefresh&&`· ${lastRefresh.toLocaleTimeString()}`}</div>
+          </div>
+          <button onClick={analyze} disabled={loading} className="flex items-center gap-1 text-xs px-3 py-1.5 bg-dark-700 hover:bg-dark-600 text-gray-400 hover:text-white border border-dark-600 rounded-lg">
+            <RefreshCw size={11} className={loading?'animate-spin':''}/> Refresh
+          </button>
         </div>
-      )}
 
-      {/* Reasoning */}
-      <div className="bg-dark-700 rounded-xl p-3 text-xs text-gray-400 leading-relaxed">
-        {data.reasoning}
-      </div>
+        {/* Score bar */}
+        <div>
+          <div className="flex justify-between text-xs text-gray-600 mb-1"><span>Bearish 0</span><span>Neutral 50</span><span>100 Bullish</span></div>
+          <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
+            <div className={`h-full rounded-full transition-all duration-500 ${data.score>60?'bg-green-500':data.score<40?'bg-red-500':'bg-yellow-500'}`} style={{width:`${Math.max(3,Math.min(97,data.score))}%`}}/>
+          </div>
+        </div>
 
-      {/* Technical indicators */}
-      {data.indicators && Object.keys(data.indicators).length > 0 && (
-        <div className="grid grid-cols-3 gap-1.5">
-          {[
-            { key: 'rsi',       label: 'RSI',        fmt: v => v.toFixed(0), color: v => v < 30 ? 'text-green-400' : v > 70 ? 'text-red-400' : 'text-gray-300' },
-            { key: 'bb_pct',    label: 'BB %',       fmt: v => (v*100).toFixed(0)+'%', color: v => v < 0.2 ? 'text-green-400' : v > 0.8 ? 'text-red-400' : 'text-gray-300' },
-            { key: 'vol_ratio', label: 'Vol Ratio',  fmt: v => v.toFixed(1)+'x', color: v => v > 1.5 ? 'text-yellow-400' : 'text-gray-300' },
-          ].map(({ key, label, fmt, color }) => {
-            const val = data.indicators[key]
-            if (val === undefined) return null
-            return (
-              <div key={key} className="bg-dark-800 rounded-lg p-2 text-center">
-                <div className="text-xs text-gray-600">{label}</div>
-                <div className={`text-sm font-bold ${color(val)}`}>{fmt(val)}</div>
+        {/* Reasoning */}
+        <div className="bg-dark-700 rounded-xl p-3 text-xs text-gray-300 leading-relaxed">{data.reasoning}</div>
+
+        {/* Entry / Exit / Stop */}
+        {data.entry && (
+          <div className="grid grid-cols-3 gap-2">
+            {[{l:'AI Entry',v:data.entry,c:'text-brand-400',bg:'bg-brand-500/10 border-brand-500/30',i:<Target size={10}/>},
+              {l:'AI Target',v:data.exit,c:'text-green-400',bg:'bg-green-900/15 border-green-800/30',i:<TrendingUp size={10}/>},
+              {l:'AI Stop',v:data.stop,c:'text-red-400',bg:'bg-red-900/15 border-red-800/30',i:<Shield size={10}/>}
+            ].map(({l,v,c,bg,i})=>(
+              <div key={l} className={`${bg} border rounded-xl p-2.5 text-center`}>
+                <div className="text-xs text-gray-500 flex items-center justify-center gap-1">{i} {l}</div>
+                <div className={`text-sm font-black ${c} mt-0.5`}>${v}</div>
               </div>
-            )
-          })}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
 
-      {/* Key levels */}
-      {data.key_levels && (
-        <div className="flex gap-2 text-xs">
-          {[
-            { label: 'Support',    val: data.key_levels.support,    color: 'text-red-400'   },
-            { label: 'VWAP',       val: data.key_levels.vwap,       color: 'text-yellow-400'},
-            { label: 'Resistance', val: data.key_levels.resistance,  color: 'text-green-400' },
-          ].filter(x => x.val).map(({ label, val, color }) => (
-            <div key={label} className="flex-1 bg-dark-800 rounded-lg p-2 text-center">
-              <div className="text-gray-600">{label}</div>
-              <div className={`font-bold ${color}`}>${val}</div>
+        {data.risk_reward && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-gray-500">Risk/Reward:</span>
+            <span className={`font-bold ${parseFloat(data.risk_reward)>=2?'text-green-400':'text-yellow-400'}`}>1:{data.risk_reward}</span>
+            {parseFloat(data.risk_reward)>=2&&<span className="text-green-400 font-bold">✓ Favorable</span>}
+          </div>
+        )}
+
+        {/* Indicators */}
+        {data.indicators&&Object.keys(data.indicators).length>0&&(
+          <div className="grid grid-cols-3 gap-1.5">
+            {[{k:'rsi',l:'RSI',f:v=>v.toFixed(0),c:v=>v<30?'text-green-400':v>70?'text-red-400':'text-gray-300'},
+              {k:'bb_pct',l:'BB %',f:v=>(v*100).toFixed(0)+'%',c:v=>v<0.2?'text-green-400':v>0.8?'text-red-400':'text-gray-300'},
+              {k:'vol_ratio',l:'Vol Ratio',f:v=>v.toFixed(1)+'x',c:v=>v>1.5?'text-yellow-400':'text-gray-300'}
+            ].map(({k,l,f,c})=>{const v=data.indicators[k];if(v===undefined)return null;return(
+              <div key={k} className="bg-dark-800 rounded-lg p-2 text-center">
+                <div className="text-xs text-gray-600">{l}</div>
+                <div className={`text-sm font-bold ${c(v)}`}>{f(v)}</div>
+              </div>
+            )})}
+          </div>
+        )}
+
+        {/* Key levels */}
+        {data.key_levels&&(
+          <div className="flex gap-2 text-xs">
+            {[{l:'Support',v:data.key_levels.support,c:'text-red-400'},{l:'VWAP',v:data.key_levels.vwap,c:'text-yellow-400'},{l:'Resistance',v:data.key_levels.resistance,c:'text-green-400'}]
+              .filter(x=>x.v&&x.v!=='—').map(({l,v,c})=>(
+              <div key={l} className="flex-1 bg-dark-800 rounded-lg p-2 text-center">
+                <div className="text-gray-600">{l}</div><div className={`font-bold ${c}`}>${v}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── My Setup Panel ── */}
+        <div className="border-t border-dark-600 pt-3">
+          <button onClick={()=>setShowSetup(s=>!s)}
+            className="flex items-center gap-2 w-full text-left text-sm font-bold text-white hover:text-brand-400 transition-colors">
+            <Zap size={14} className="text-yellow-400"/>
+            Set My Entry / Exit / Stop Loss
+            <ChevronDown size={14} className={`ml-auto transition-transform ${showSetup?'rotate-180':''}`}/>
+          </button>
+
+          {showSetup&&(
+            <div className="mt-3 space-y-3">
+              <div className="grid grid-cols-3 gap-2">
+                {[{key:'buyAt',label:'Buy at ($)',color:'focus:border-brand-500'},
+                  {key:'exitAt',label:'Target ($)',color:'focus:border-green-500'},
+                  {key:'stopAt',label:'Stop Loss ($)',color:'focus:border-red-500'}
+                ].map(({key,label,color})=>(
+                  <div key={key}>
+                    <label className="text-xs text-gray-500">{label}</label>
+                    <input type="number" value={order[key]} onChange={e=>setOrder(o=>({...o,[key]:e.target.value}))}
+                      placeholder={data[key==='buyAt'?'entry':key==='exitAt'?'exit':'stop']||''}
+                      step="0.01" className={`w-full mt-1 bg-dark-800 border border-dark-600 rounded-xl px-3 py-2 text-white text-sm focus:outline-none ${color}`}/>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">Quantity (shares)</label>
+                <input type="number" value={order.qty} onChange={e=>setOrder(o=>({...o,qty:e.target.value}))}
+                  placeholder="e.g. 10" className="w-full mt-1 bg-dark-800 border border-dark-600 rounded-xl px-3 py-2 text-white text-sm focus:outline-none focus:border-brand-500"/>
+              </div>
+
+              {order.buyAt&&order.exitAt&&order.stopAt&&order.qty&&(
+                <div className="bg-dark-700 rounded-xl p-3 text-xs space-y-1 text-gray-400">
+                  <div className="font-bold text-white mb-1">📋 Your Setup Summary</div>
+                  <div>Buy <span className="text-white font-bold">{order.qty} shares</span> of ${symbol} at <span className="text-brand-400 font-bold">${order.buyAt}</span></div>
+                  <div>Take profit at <span className="text-green-400 font-bold">${order.exitAt}</span> → gain <span className="text-green-400 font-bold">+${((parseFloat(order.exitAt)-parseFloat(order.buyAt))*parseFloat(order.qty)).toFixed(2)}</span></div>
+                  <div>Stop loss at <span className="text-red-400 font-bold">${order.stopAt}</span> → max loss <span className="text-red-400 font-bold">-${((parseFloat(order.buyAt)-parseFloat(order.stopAt))*parseFloat(order.qty)).toFixed(2)}</span></div>
+                  <div>R:R → <span className="font-bold text-yellow-400">1:{((parseFloat(order.exitAt)-parseFloat(order.buyAt))/(parseFloat(order.buyAt)-parseFloat(order.stopAt))).toFixed(1)}</span></div>
+                </div>
+              )}
+
+              {/* RED DISCLAIMER */}
+              <div className="bg-red-900/20 border-2 border-red-700/60 rounded-xl p-3 space-y-1.5">
+                <div className="text-xs font-black text-red-400">⚠️ IMPORTANT DISCLAIMER — READ BEFORE ACTING</div>
+                <div className="text-xs text-red-300/80 leading-relaxed">
+                  This analysis is <strong className="text-red-300">purely informational</strong> and generated by an automated AI system. It is <strong className="text-red-300">NOT financial advice</strong> and NOT a recommendation to buy or sell any security.
+                </div>
+                <div className="text-xs text-red-300/70 leading-relaxed">
+                  AI can be wrong. Markets are unpredictable. You may <strong className="text-red-200">lose some or all of your money</strong>. You alone are responsible for any trades you execute. Morviq AI accepts <strong className="text-red-200">no liability</strong> for any losses.
+                </div>
+                <div className="text-xs text-red-400 font-bold">All investment decisions are yours alone. Always manage your risk.</div>
+              </div>
+
+              <button onClick={()=>{setOrderMsg('✅ Setup noted! Execute this in your own brokerage. We hold no responsibility for outcomes.');setTimeout(()=>setOrderMsg(''),6000)}}
+                className="w-full py-2.5 bg-dark-700 hover:bg-dark-600 text-white border border-dark-600 rounded-xl text-sm font-bold">
+                📋 Save This Setup (Informational Only)
+              </button>
+              {orderMsg&&<div className="p-3 bg-green-900/20 border border-green-800/40 rounded-xl text-xs text-green-400">{orderMsg}</div>}
             </div>
-          ))}
+          )}
         </div>
-      )}
 
-      <p className="text-xs text-gray-600 text-center">
-        ⚠️ AI analysis updates every minute. Not financial advice. Always manage your risk.
-      </p>
+        <p className="text-xs text-gray-600 text-center flex items-center justify-center gap-1">
+          <Zap size={10} className="text-yellow-500"/> Auto-updates every 60 seconds with live market data
+        </p>
+      </>)}
     </div>
   )
 }
+
 
 // ── Community Chat ────────────────────────────────────────────────────────────
 function CommunityChat({ symbol, currentUserId }) {
@@ -507,8 +536,20 @@ export default function SymbolPage({ symbol, onClose, currentUserId }) {
       {/* Header */}
       <div className="flex-shrink-0 bg-dark-900 border-b border-dark-700 px-4 py-3">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500/30 to-teal-500/20 border border-brand-500/30 flex items-center justify-center font-black text-white text-xs">
-            {symbol.slice(0,2)}
+          {/* Company logo with fallback */}
+          <div className="w-10 h-10 rounded-xl bg-dark-700 border border-dark-600 flex items-center justify-center overflow-hidden flex-shrink-0">
+            <img
+              src={`https://assets.parqet.com/logos/symbol/${symbol}?format=png`}
+              alt={symbol}
+              className="w-10 h-10 object-contain rounded-xl"
+              onError={e => {
+                e.target.style.display = 'none'
+                e.target.nextSibling.style.display = 'flex'
+              }}
+            />
+            <div className="hidden w-full h-full items-center justify-center font-black text-white text-xs">
+              {symbol.slice(0,2)}
+            </div>
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -533,6 +574,15 @@ export default function SymbolPage({ symbol, onClose, currentUserId }) {
               inWatch ? 'text-brand-400 border-brand-500/40 bg-brand-500/10' : 'text-gray-500 border-dark-600 hover:border-brand-400 hover:text-brand-400'
             }`}>
             <Star size={11}/> {inWatch ? 'Watching' : 'Watch'}
+          </button>
+          <button
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent('openSymbolFullPage', { detail: symbol }))
+              if (onClose) onClose()
+            }}
+            className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border border-dark-600 text-gray-500 hover:border-brand-400 hover:text-brand-400 transition-all"
+            title="Open full discussion board">
+            <MessageCircle size={11}/> Board
           </button>
           {onClose && (
             <button onClick={onClose}

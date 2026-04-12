@@ -40,6 +40,16 @@ function timeAgo(iso) {
   return new Date(iso).toLocaleDateString()
 }
 
+function formatDateTime(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleDateString('en-US', {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  })
+}
+
 function Card({ children, className = '' }) {
   return (
     <div className={`bg-dark-800 border border-dark-600 rounded-xl p-4 ${className}`}>
@@ -531,7 +541,7 @@ function AuditTab() {
                   <span className="font-bold">{l.event}</span>
                   {l.user_email && <span className="opacity-60 truncate">{l.user_email}</span>}
                 </div>
-                <div className="opacity-50 mt-0.5 truncate">{l.ip} · {timeAgo(l.timestamp)}</div>
+                <div className="opacity-50 mt-0.5 truncate">{l.ip} · <span className="font-mono">{formatDateTime(l.timestamp)}</span></div>
               </div>
               <span className={`px-1.5 py-0.5 rounded font-bold flex-shrink-0 ${SEV_COLOR[l.severity]}`}>
                 {l.severity}
@@ -557,7 +567,7 @@ function AuditTab() {
 
             <div className="space-y-2 text-xs">
               {[
-                ['Timestamp',  new Date(selected.timestamp).toLocaleString()],
+                ['Timestamp',  formatDateTime(selected.timestamp)],
                 ['Severity',   selected.severity],
                 ['User ID',    selected.user_id || '—'],
                 ['Email',      selected.user_email || '—'],
@@ -615,12 +625,17 @@ function AuditTab() {
 // ── Tab: Legal Documents ──────────────────────────────────────────────────────
 
 const DOC_TYPES = [
-  { value: 'tos',       label: 'Terms of Service' },
-  { value: 'privacy',   label: 'Privacy Policy' },
-  { value: 'risk',      label: 'Risk Disclaimer' },
-  { value: 'cookies',   label: 'Cookie Policy' },
-  { value: 'about',     label: 'About Us' },
+  { value: 'tos',              label: 'Terms of Service',          badge: 'Consent Flow',  color: 'text-brand-400'  },
+  { value: 'risk',             label: 'Risk Disclosure',           badge: 'Consent Flow',  color: 'text-red-400'    },
+  { value: 'auto_trading',     label: 'Auto-Trading Authorization', badge: 'Consent Flow',  color: 'text-yellow-400' },
+  { value: 'privacy',          label: 'Privacy Policy',            badge: 'Legal',         color: 'text-blue-400'   },
+  { value: 'cookies',          label: 'Cookie Policy',             badge: 'Legal',         color: 'text-gray-400'   },
+  { value: 'about',            label: 'About Us',                  badge: 'Content',       color: 'text-green-400'  },
+  { value: 'suitability',      label: 'Suitability Questions',     badge: 'Consent Flow',  color: 'text-purple-400' },
+  { value: 'disclaimer',       label: 'Trading Disclaimer',        badge: 'Legal',         color: 'text-red-400'    },
 ]
+
+const CONSENT_FLOW_DOCS = ['tos', 'risk', 'auto_trading', 'suitability']
 
 function RichEditor({ value, onChange }) {
   const editorRef  = useRef(null)
@@ -871,11 +886,45 @@ function LegalTab() {
         /* Doc List */
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="font-bold text-white">Active Legal Documents</h3>
+            <h3 className="font-bold text-white">Legal Documents</h3>
             <button onClick={startNew}
               className="flex items-center gap-1.5 text-xs px-3 py-2 bg-brand-500/20 text-brand-400 border border-brand-500/30 rounded-lg hover:bg-brand-500/30">
               <Plus size={12}/> New Document
             </button>
+          </div>
+
+          {/* Consent Flow Status */}
+          <div className="bg-dark-700 border border-dark-600 rounded-xl p-3">
+            <div className="text-xs font-bold text-white mb-2">
+              📋 Consent Flow Documents — Users must read these during signup
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {CONSENT_FLOW_DOCS.map(dt => {
+                const doc = active.find(d => d.doc_type === dt)
+                const type = DOC_TYPES.find(t => t.value === dt)
+                return (
+                  <div key={dt} className={`flex items-center gap-2 p-2 rounded-lg border text-xs ${
+                    doc ? 'bg-green-900/10 border-green-800/30' : 'bg-red-900/10 border-red-800/30'
+                  }`}>
+                    <span className={doc ? 'text-green-400' : 'text-red-400'}>{doc ? '✅' : '❌'}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold text-white truncate">{type?.label}</div>
+                      {doc ? (
+                        <div className="text-gray-500 truncate">v{doc.version} · {timeAgo(doc.updated_at)}</div>
+                      ) : (
+                        <div className="text-red-400">Missing — users will see hardcoded text</div>
+                      )}
+                    </div>
+                    {!doc && (
+                      <button onClick={() => { startNew(); setForm(f => ({...f, doc_type: dt})) }}
+                        className="text-xs px-1.5 py-0.5 bg-red-900/30 text-red-400 border border-red-800/40 rounded hover:bg-red-900/50 flex-shrink-0">
+                        Add
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </div>
 
           {active.map(d => (
@@ -886,17 +935,22 @@ function LegalTab() {
                     <span className="font-bold text-white">{d.title}</span>
                     <span className="text-xs bg-green-900/30 text-green-400 px-1.5 py-0.5 rounded">Active</span>
                     <span className="text-xs text-gray-600">v{d.version}</span>
+                    {CONSENT_FLOW_DOCS.includes(d.doc_type) && (
+                      <span className="text-xs bg-brand-500/20 text-brand-400 border border-brand-500/30 px-1.5 py-0.5 rounded">📋 Consent Flow</span>
+                    )}
                     {d.show_in_footer && <span className="text-xs bg-blue-900/30 text-blue-400 border border-blue-800/40 px-1.5 py-0.5 rounded">📍 Footer</span>}
                     {d.show_in_nav    && <span className="text-xs bg-purple-900/30 text-purple-400 border border-purple-800/40 px-1.5 py-0.5 rounded">🔗 Nav</span>}
                     {d.show_in_signup && <span className="text-xs bg-yellow-900/30 text-yellow-400 border border-yellow-800/40 px-1.5 py-0.5 rounded">📋 Signup</span>}
-                    {!d.show_in_footer && !d.show_in_nav && !d.show_in_signup && (
+                    {!d.show_in_footer && !d.show_in_nav && !d.show_in_signup && !CONSENT_FLOW_DOCS.includes(d.doc_type) && (
                       <span className="text-xs bg-dark-700 text-gray-500 px-1.5 py-0.5 rounded">Hidden</span>
                     )}
                   </div>
                   <div className="text-xs text-gray-500">
-                    {DOC_TYPES.find(t => t.value === d.doc_type)?.label} ·
-                    Hash: <span className="font-mono">{d.content_hash?.slice(0, 16)}…</span> ·
-                    Updated: {timeAgo(d.updated_at)}
+                    <span className={DOC_TYPES.find(t => t.value === d.doc_type)?.color || 'text-gray-400'}>
+                      {DOC_TYPES.find(t => t.value === d.doc_type)?.label}
+                    </span>
+                    {' · '}Hash: <span className="font-mono">{d.content_hash?.slice(0, 16)}…</span>
+                    {' · '}Updated: <span className="font-mono">{formatDateTime(d.updated_at)}</span>
                   </div>
                 </div>
                 <div className="flex gap-2">
