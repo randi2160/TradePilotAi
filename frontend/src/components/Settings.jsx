@@ -34,6 +34,12 @@ export default function Settings() {
   const [newSym,  setNewSym]  = useState('')
   const [saving,  setSaving]  = useState('')
   const [msg,     setMsg]     = useState('')
+  // Engine settings
+  const [engineMode,    setEngineMode]    = useState('stocks_only')
+  const [cryptoAlloc,   setCryptoAlloc]   = useState(30)
+  const [stopHour,      setStopHour]      = useState(15)
+  const [stopMinute,    setStopMinute]    = useState(30)
+  const [maxPositions,  setMaxPositions]  = useState(3)
 
   useEffect(() => { load() }, [])
 
@@ -46,6 +52,11 @@ export default function Settings() {
       setTMax(s.daily_target_max)
       setMaxLoss(s.max_daily_loss)
       setWl(s.watchlist ?? [])
+      setEngineMode(s.engine_mode   || 'stocks_only')
+      setCryptoAlloc(Math.round((s.crypto_alloc_pct || 0.30) * 100))
+      setStopHour(s.stop_new_trades_hour   ?? 15)
+      setStopMinute(s.stop_new_trades_minute ?? 30)
+      setMaxPositions(s.max_open_positions   ?? 3)
     } catch {}
   }
 
@@ -195,6 +206,135 @@ export default function Settings() {
         >
           <Save size={15} />
           {saving === 'targets' ? 'Saving…' : 'Save Targets'}
+        </button>
+      </div>
+
+      {/* ── Engine & Trading Mode ──────────────────────────────────────────────── */}
+      <div className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-lg">⚡</span>
+          <h3 className="font-bold text-white">Engine Mode & Safety Rules</h3>
+        </div>
+
+        {/* Engine mode selector */}
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-gray-400">Trading Engine</label>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { id: 'stocks_only', label: '📈 Stocks Only',   desc: 'US equities · PDT rules apply' },
+              { id: 'crypto_only', label: '₿ Crypto Only',    desc: '24/7 · No PDT · Scalping mode' },
+              { id: 'hybrid',      label: '⚡ Hybrid',         desc: 'AI splits capital between both' },
+            ].map(m => (
+              <button key={m.id} onClick={() => setEngineMode(m.id)}
+                className={`p-3 rounded-xl border text-left transition-all ${
+                  engineMode === m.id
+                    ? 'border-brand-500 bg-brand-500/10 text-brand-400'
+                    : 'border-dark-600 bg-dark-700 text-gray-400 hover:border-dark-500'
+                }`}>
+                <div className="text-xs font-bold">{m.label}</div>
+                <div className="text-xs text-gray-600 mt-0.5">{m.desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Crypto allocation slider (only for hybrid) */}
+        {engineMode === 'hybrid' && (
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-gray-400">
+              Crypto Allocation: <span className="text-brand-400">{cryptoAlloc}%</span>
+              <span className="text-gray-600 ml-2">(Stocks: {100 - cryptoAlloc}%)</span>
+            </label>
+            <input type="range" min={10} max={70} step={5} value={cryptoAlloc}
+              onChange={e => setCryptoAlloc(Number(e.target.value))}
+              className="w-full accent-brand-500"/>
+            <div className="flex justify-between text-xs text-gray-600">
+              <span>10% Crypto</span><span>40% Split</span><span>70% Crypto</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs text-center">
+              {cfg?.capital && [
+                { l: 'Crypto Budget', v: `$${((cfg.capital * cryptoAlloc / 100)).toFixed(0)}`, c: 'text-yellow-400' },
+                { l: 'Stock Budget',  v: `$${((cfg.capital * (100-cryptoAlloc) / 100)).toFixed(0)}`, c: 'text-brand-400' },
+              ].map(({ l, v, c }) => (
+                <div key={l} className="bg-dark-700 rounded-lg p-2">
+                  <div className="text-gray-500">{l}</div>
+                  <div className={`font-bold mt-0.5 ${c}`}>{v}</div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-gray-600">AI dynamically adjusts this split based on PDT remaining, time of day, and P&L progress.</p>
+          </div>
+        )}
+
+        {/* Safety rules */}
+        <div className="space-y-3 border-t border-dark-700 pt-3">
+          <label className="text-xs font-bold text-gray-400">Safety Rules (Stocks)</label>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-gray-500">Stop New Trades At</label>
+              <div className="flex gap-2 mt-1">
+                <select value={stopHour} onChange={e => setStopHour(Number(e.target.value))}
+                  className="flex-1 bg-dark-700 border border-dark-600 rounded-lg px-2 py-2 text-white text-sm focus:outline-none focus:border-brand-500">
+                  {[9,10,11,12,13,14,15,16].map(h => (
+                    <option key={h} value={h}>{h}:00</option>
+                  ))}
+                </select>
+                <select value={stopMinute} onChange={e => setStopMinute(Number(e.target.value))}
+                  className="flex-1 bg-dark-700 border border-dark-600 rounded-lg px-2 py-2 text-white text-sm focus:outline-none focus:border-brand-500">
+                  {[0,15,30,45].map(m => (
+                    <option key={m} value={m}>:{m.toString().padStart(2,'0')}</option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-xs text-gray-600 mt-1">No new positions after this time (ET)</p>
+            </div>
+            <div>
+              <label className="text-xs text-gray-500">Max Open Positions</label>
+              <input type="number" min={1} max={10} value={maxPositions}
+                onChange={e => setMaxPositions(Number(e.target.value))}
+                className="w-full mt-1 bg-dark-700 border border-dark-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-brand-500"/>
+              <p className="text-xs text-gray-600 mt-1">Bot won't open more than this many at once</p>
+            </div>
+          </div>
+
+          {/* Live safety rules summary */}
+          <div className="bg-dark-900 border border-dark-700 rounded-xl p-3 space-y-1.5">
+            <div className="text-xs font-bold text-white mb-2">Current Safety Rules (from your settings)</div>
+            {[
+              { label: 'Bot stops when target hit', val: `$${tMax}` },
+              { label: 'Bot stops if daily loss exceeds', val: `$${maxLoss}` },
+              { label: 'No new trades after', val: `${stopHour}:${stopMinute.toString().padStart(2,'0')} ET` },
+              { label: 'All positions closed at', val: '3:55 PM ET (always)' },
+              { label: 'Max open positions', val: `${maxPositions} concurrent` },
+              { label: 'Crypto PDT restriction', val: 'None (24/7)' },
+            ].map(({ label, val }) => (
+              <div key={label} className="flex items-center gap-2 text-xs">
+                <span className="text-green-400">•</span>
+                <span className="text-gray-400 flex-1">{label}</span>
+                <span className="text-white font-bold">{val}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <button onClick={async () => {
+          setSaving('engine')
+          try {
+            const { api } = await import('../hooks/useAuth')
+            await api.put('/settings/engine', {
+              stop_new_trades_hour:   stopHour,
+              stop_new_trades_minute: stopMinute,
+              max_open_positions:     maxPositions,
+              engine_mode:            engineMode,
+              crypto_alloc_pct:       cryptoAlloc / 100,
+            })
+            flash('✅ Engine settings saved!')
+          } catch(e) {
+            flash(`❌ ${e.response?.data?.detail ?? e.message}`)
+          } finally { setSaving('') }
+        }} disabled={saving === 'engine'}
+          className="w-full flex items-center justify-center gap-2 bg-brand-500 hover:bg-brand-600 text-dark-900 font-bold px-4 py-3 rounded-xl disabled:opacity-50 transition-colors">
+          {saving === 'engine' ? '⏳ Saving…' : '⚡ Save Engine Settings'}
         </button>
       </div>
 

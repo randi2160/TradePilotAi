@@ -992,14 +992,23 @@ function LegalTab() {
 // ── Tab: Platform Settings ────────────────────────────────────────────────────
 
 const DEFAULT_SETTINGS = [
-  { key: 'company_name',       value: 'Morviq AI',          desc: 'Company name',         public: true },
-  { key: 'support_email',      value: 'hello@morviqai.com', desc: 'Support email',         public: true },
-  { key: 'tos_version',        value: '2026-04-11',         desc: 'Current ToS version',   public: true },
-  { key: 'max_daily_loss_default', value: '150',             desc: 'Default max daily loss ($)', public: false },
-  { key: 'global_trading_halted', value: 'false',           desc: 'Emergency kill switch', public: false },
-  { key: 'copy_min_days',      value: '30',                 desc: 'Min days to be copyable', public: false },
-  { key: 'copy_min_winrate',   value: '60',                 desc: 'Min win rate % to be copyable', public: false },
-  { key: 'maintenance_mode',   value: 'false',              desc: 'Show maintenance page',  public: false },
+  { key: 'company_name',          value: 'Morviq AI',          desc: 'Company name',                    public: true  },
+  { key: 'support_email',         value: 'hello@morviqai.com', desc: 'Support email',                   public: true  },
+  { key: 'tos_version',           value: '2026-04-11',         desc: 'Current ToS version',             public: true  },
+  { key: 'max_daily_loss_default',value: '150',                desc: 'Default max daily loss ($)',       public: false },
+  { key: 'global_trading_halted', value: 'false',              desc: 'Emergency kill switch',            public: false },
+  { key: 'copy_min_days',         value: '30',                 desc: 'Min days to be copyable',          public: false },
+  { key: 'copy_min_winrate',      value: '60',                 desc: 'Min win rate % to be copyable',    public: false },
+  { key: 'maintenance_mode',      value: 'false',              desc: 'Show maintenance page',            public: false },
+  // AI Analysis Rate Control
+  { key: 'ai_enabled',            value: 'true',               desc: 'Global AI analysis on/off',        public: true  },
+  { key: 'ai_refresh_free',       value: '900',                desc: 'Free tier AI refresh (seconds) — default 900 = 15 min', public: true },
+  { key: 'ai_refresh_subscriber', value: '60',                 desc: 'Subscriber AI refresh (seconds) — default 60 = 1 min',  public: true },
+  { key: 'ai_refresh_pro',        value: '0',                  desc: 'Pro tier AI refresh (seconds) — 0 = real-time',         public: true },
+  { key: 'ai_refresh_admin',      value: '0',                  desc: 'Admin AI refresh (seconds) — 0 = real-time',            public: false },
+  // Alert System
+  { key: 'alerts_enabled',        value: 'true',               desc: 'Entry/exit alert system on/off',   public: false },
+  { key: 'alert_confidence_min',  value: '65',                 desc: 'Min AI confidence % to trigger alert', public: false },
 ]
 
 function SettingsTab() {
@@ -1097,7 +1106,122 @@ const TABS = [
   { id: 'audit',     label: 'Audit Log',  icon: Shield },
   { id: 'legal',     label: 'Legal Docs', icon: FileText },
   { id: 'settings',  label: 'Settings',   icon: Settings },
+  { id: 'testmode',  label: 'Test Mode',  icon: ToggleRight },
 ]
+
+// ── Tab: Test Mode ────────────────────────────────────────────────────────────
+function TestModeTab() {
+  const [status,    setStatus]    = useState(null)
+  const [activeTier,setActiveTier]= useState(null)
+  const [loading,   setLoading]   = useState(false)
+  const [msg,       setMsg]       = useState('')
+
+  useEffect(() => {
+    api.get('/billing/status').then(r => {
+      setStatus(r.data)
+      setActiveTier(r.data.admin_test_tier || null)
+    }).catch(() => {})
+  }, [])
+
+  async function setTestTier(tier) {
+    setLoading(true)
+    try {
+      const r = await api.post('/billing/admin/test-mode', { tier })
+      setActiveTier(tier)
+      setMsg('✅ ' + r.data.message)
+      setTimeout(() => setMsg(''), 4000)
+    } catch (e) {
+      setMsg('❌ ' + (e.response?.data?.detail ?? e.message))
+    } finally { setLoading(false) }
+  }
+
+  const TIERS = [
+    { id: null,         label: 'Real Tier',    desc: 'Reset to your actual subscription',       color: 'border-gray-600 text-gray-400',          bg: '' },
+    { id: 'free',       label: 'Free',         desc: 'Paper trading only · No live · 0 copy',   color: 'border-gray-500 text-gray-300',          bg: '' },
+    { id: 'subscriber', label: 'Subscriber $29', desc: 'Live trading · Copy 2 leaders · 1 group', color: 'border-brand-500/60 text-brand-400',   bg: 'bg-brand-500/5' },
+    { id: 'pro',        label: 'Pro $79',      desc: 'All features · 10 copy · Unlimited',      color: 'border-yellow-500/60 text-yellow-400',   bg: 'bg-yellow-500/5' },
+  ]
+
+  return (
+    <div className="space-y-5">
+
+      {/* Status banner */}
+      <div className="bg-dark-700 border border-brand-500/30 rounded-xl p-4 space-y-2">
+        <div className="flex items-center gap-2">
+          <Shield size={16} className="text-brand-400"/>
+          <span className="text-sm font-bold text-white">Admin Account — Full Access</span>
+          <span className="ml-auto text-xs px-2 py-0.5 bg-yellow-900/30 text-yellow-400 border border-yellow-800/40 rounded font-bold">ADMIN</span>
+        </div>
+        <div className="text-xs text-gray-400 leading-relaxed">
+          As an admin, you have full access to ALL features regardless of subscription tier.
+          Live trading, unlimited copy trading, all AI features — no restrictions apply to your account.
+        </div>
+        <div className="grid grid-cols-2 gap-2 mt-2">
+          <div className="bg-dark-800 rounded-lg p-2 text-center text-xs">
+            <div className="text-gray-500">Live Trading</div>
+            <div className="text-green-400 font-bold">✅ Always On</div>
+          </div>
+          <div className="bg-dark-800 rounded-lg p-2 text-center text-xs">
+            <div className="text-gray-500">Effective Plan</div>
+            <div className="text-yellow-400 font-bold">
+              {activeTier ? `Simulating: ${activeTier}` : '👑 Pro (Admin)'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {msg && (
+        <div className={`p-3 rounded-xl text-sm ${msg.startsWith('✅') ? 'bg-green-900/20 border border-green-800/40 text-green-400' : 'bg-red-900/20 border border-red-800/40 text-red-400'}`}>
+          {msg}
+        </div>
+      )}
+
+      {/* Test Mode selector */}
+      <div>
+        <div className="text-xs font-bold text-white mb-1">Simulate Billing Tier</div>
+        <div className="text-xs text-gray-500 mb-3">
+          Test how the platform behaves for users on different plans. Feature gates will apply as if you were on the selected tier.
+          Your admin privileges for trading are NOT affected.
+        </div>
+        <div className="space-y-2">
+          {TIERS.map(t => (
+            <button key={String(t.id)} onClick={() => setTestTier(t.id)} disabled={loading}
+              className={`w-full flex items-center gap-3 p-3.5 rounded-xl border-2 text-left transition-all disabled:opacity-50 ${
+                activeTier === t.id
+                  ? t.color + ' ' + (t.bg || 'bg-dark-700')
+                  : 'border-dark-600 bg-dark-800 hover:border-dark-500'
+              }`}>
+              <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 ${
+                activeTier === t.id ? 'border-current bg-current' : 'border-gray-600'
+              }`}/>
+              <div className="flex-1">
+                <div className={`text-sm font-bold ${activeTier === t.id ? '' : 'text-white'}`}>{t.label}</div>
+                <div className="text-xs text-gray-500 mt-0.5">{t.desc}</div>
+              </div>
+              {activeTier === t.id && <CheckCircle size={16} className="text-current flex-shrink-0"/>}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* What test mode does */}
+      <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 space-y-2">
+        <div className="text-xs font-bold text-white">What Test Mode Does</div>
+        {[
+          '✅ UI billing status shows simulated tier',
+          '✅ Feature restriction banners appear as users would see them',
+          '✅ Copy trading limits reflect selected tier',
+          '✅ AI analysis limits reflect selected tier',
+          '✅ Great for QA testing before launch',
+          '🔒 Your actual live trading is NEVER restricted — admin override always applies',
+          '🔒 Your real Stripe subscription is not changed',
+        ].map((item, i) => (
+          <div key={i} className="text-xs text-gray-500">{item}</div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 export default function AdminPanel() {
   const [tab, setTab] = useState('dashboard')
@@ -1153,6 +1277,7 @@ export default function AdminPanel() {
       {tab === 'audit'     && <AuditTab/>}
       {tab === 'legal'     && <LegalTab/>}
       {tab === 'settings'  && <SettingsTab/>}
+      {tab === 'testmode'  && <TestModeTab/>}
     </div>
   )
 }

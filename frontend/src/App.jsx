@@ -33,9 +33,13 @@ import SafetyControls      from './components/SafetyControls'
 import ConsentFlow         from './components/ConsentFlow'
 import SymbolPage          from './components/SymbolPage'
 import StockBoard         from './components/StockBoard'
+import BillingTab         from './components/BillingTab'
+import AlertBell, { AIRefreshBadge } from './components/AlertBell'
+import DailyAdvisor, { DailyPicksMini } from './components/DailyAdvisor'
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
+  { id: 'daily',       label: '🎯', full: 'Daily Advisor' },
   { id: 'ai',          label: '🧠', full: 'AI Advisor'    },
   { id: 'social',      label: '👥', full: 'Social'        },
   { id: 'copy',        label: '📋', full: 'Copy Trading'  },
@@ -60,6 +64,7 @@ const TABS = [
   { id: 'broker',      label: '🔌', full: 'My Broker'     },
   { id: 'settings',    label: '🛠️', full: 'Settings'      },
   { id: 'profile',     label: '👤', full: 'Profile'       },
+  { id: 'billing',     label: '💳', full: 'Billing'       },
   { id: 'admin',       label: '🛡️', full: 'Admin'         },
 ]
 
@@ -167,9 +172,11 @@ function TradingApp() {
             ⚡ {pending.length} pending
           </button>
         )}
+        <AlertBell userTier={user?.is_admin ? 'admin' : (user?.subscription_tier || 'free')}/>
         <button onClick={() => setTab('profile')} className="ml-auto w-8 h-8 rounded-full bg-brand-500 flex items-center justify-center text-dark-900 text-xs font-black hover:bg-brand-400 transition-colors">
           {user.avatar_initials ?? user.email.slice(0,2).toUpperCase()}
         </button>
+        <AIRefreshBadge tier={user?.is_admin ? 'admin' : (user?.subscription_tier || 'free')} compact={true}/>
         <div className="flex items-center gap-1.5">
           <div className={`w-2 h-2 rounded-full ${!connected ? 'bg-red-500' : running ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'}`}/>
           <span className="text-xs text-gray-400 hidden sm:block">
@@ -223,7 +230,22 @@ function TradingApp() {
 
       {/* Content */}
       <main className="flex-1 max-w-screen-xl w-full mx-auto p-4 md:p-6 overflow-auto">
-        {tab === 'dashboard'   && <div className="space-y-5"><PortfolioChart capital={capital}/><Dashboard data={data}/></div>}
+        {tab === 'dashboard'   && (
+          <div className="space-y-5">
+            <PortfolioChart capital={capital}/>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+              {/* Main dashboard info */}
+              <div className="lg:col-span-2">
+                <Dashboard data={data}/>
+              </div>
+              {/* Daily picks mini card */}
+              <div className="bg-dark-800 border border-dark-600 rounded-2xl p-4">
+                <DailyPicksMini onNavigate={setTab}/>
+              </div>
+            </div>
+          </div>
+        )}
+        {tab === 'daily'       && <DailyAdvisor/>}
         {tab === 'ai'          && <AIAdvisor           onAddToWatchlist={handleAddToWatchlist}/>}
         {tab === 'social'      && <SocialFeed           currentUserId={user?.id}/>}
         {tab === 'copy'        && <CopyTrading/>}
@@ -249,6 +271,7 @@ function TradingApp() {
         {tab === 'broker'      && <BrokerManager/>}
         {tab === 'settings'    && <Settings/>}
         {tab === 'profile'     && <UserProfile/>}
+        {tab === 'billing'     && <BillingTab/>}
       </main>
 
       <footer className="text-center py-2 text-xs text-gray-700 border-t border-dark-800">

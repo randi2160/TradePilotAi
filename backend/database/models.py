@@ -48,6 +48,16 @@ class User(Base):
 
     is_active        = Column(Boolean, default=True)
     is_admin         = Column(Boolean, default=False)
+
+    # Subscription
+    subscription_tier              = Column(String(20), default="free")
+    stripe_customer_id             = Column(String(100), nullable=True)
+    stripe_subscription_id         = Column(String(100), nullable=True)
+    subscription_period_end        = Column(String(50),  nullable=True)
+    subscription_cancel_at_period_end = Column(Boolean, default=False)
+
+    # Admin test mode — simulate a different billing tier
+    admin_test_tier                = Column(String(20), nullable=True)
     created_at       = Column(DateTime, default=datetime.utcnow)
     last_login       = Column(DateTime, nullable=True)
 
@@ -440,3 +450,126 @@ class CompanySettings(Base):
     is_public   = Column(Boolean, default=False)
     updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     updated_by  = Column(Integer, nullable=True)
+
+
+class AIAnalysisResult(Base):
+    """Cached AI analysis results — avoids redundant OpenAI calls."""
+    __tablename__ = "ai_analysis_results"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    cache_key     = Column(String(200), unique=True, nullable=False, index=True)
+    symbol        = Column(String(20),  nullable=False, index=True)
+    analysis_type = Column(String(50),  nullable=False, default="sentiment")
+    result_json   = Column(Text,        nullable=False)
+    user_id       = Column(Integer,     nullable=True)
+    created_at    = Column(DateTime,    default=datetime.utcnow, nullable=False, index=True)
+
+
+class TradeAlert(Base):
+    """Entry/exit alerts for watched symbols — shown in alert bell."""
+    __tablename__ = "trade_alerts"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, nullable=False, index=True)
+    symbol      = Column(String(20),  nullable=False)
+    alert_type  = Column(String(30),  nullable=False)  # entry | exit | warning | info
+    signal      = Column(String(10),  nullable=True)   # BUY | SELL | HOLD
+    price       = Column(Float,       nullable=True)
+    target      = Column(Float,       nullable=True)
+    stop        = Column(Float,       nullable=True)
+    confidence  = Column(Integer,     nullable=True)
+    message     = Column(String(500), nullable=False)
+    is_read     = Column(Boolean,     default=False)
+    created_at  = Column(DateTime,    default=datetime.utcnow, index=True)
+
+
+class TradingAlert(Base):
+    """Full AI-generated entry/exit alerts with all analysis data."""
+    __tablename__ = "trading_alerts"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, nullable=False, index=True)
+    symbol      = Column(String(20),   nullable=False, index=True)
+    alert_type  = Column(String(30),   nullable=False)  # BUY_SIGNAL | SELL_SIGNAL | STOP_HIT | TARGET_HIT | VOLUME
+    signal      = Column(String(10),   nullable=True)   # BUY | SELL | HOLD
+    confidence  = Column(Integer,      nullable=True)
+    price       = Column(Float,        nullable=True)
+    entry_price = Column(Float,        nullable=True)
+    exit_price  = Column(Float,        nullable=True)
+    stop_price  = Column(Float,        nullable=True)
+    risk_reward = Column(Float,        nullable=True)
+    reasoning   = Column(String(500),  nullable=True)
+    indicators  = Column(Text,         nullable=True)   # JSON
+    is_read     = Column(Boolean,      default=False)
+    created_at  = Column(DateTime,     default=datetime.utcnow, index=True)
+
+
+class DailyUserPick(Base):
+    """Stocks user wants to invest in today — their personal daily list."""
+    __tablename__ = "daily_user_picks"
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, nullable=False, index=True)
+    symbol      = Column(String(20), nullable=False)
+    note        = Column(String(200), nullable=True)   # user's personal note
+    trade_date  = Column(String(10), nullable=False)   # YYYY-MM-DD
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+
+class AIRecommendation(Base):
+    """AI-generated trade suggestions for the day — shown on dashboard."""
+    __tablename__ = "ai_recommendations"
+    id             = Column(Integer, primary_key=True, index=True)
+    user_id        = Column(Integer, nullable=False, index=True)
+    symbol         = Column(String(20), nullable=False)
+    rank           = Column(Integer, nullable=False)   # 1, 2, 3 — numbered suggestions
+    signal         = Column(String(10), nullable=False)  # BUY | SELL | HOLD
+    confidence     = Column(Integer, nullable=True)
+    score          = Column(Float, nullable=True)
+    entry          = Column(Float, nullable=True)
+    exit_target    = Column(Float, nullable=True)
+    stop           = Column(Float, nullable=True)
+    risk_reward    = Column(Float, nullable=True)
+    suggested_qty  = Column(Integer, nullable=True)
+    suggested_alloc= Column(Float, nullable=True)   # $ amount to allocate
+    reasoning      = Column(Text, nullable=True)
+    source         = Column(String(20), default="ai")  # ai | scanner | news
+    trade_date     = Column(String(10), nullable=False)
+    # Review flow
+    status         = Column(String(20), default="pending")  # pending | reviewed | accepted | rejected
+    reviewed_at    = Column(DateTime, nullable=True)
+    accepted_at    = Column(DateTime, nullable=True)
+    eligible_for_auto = Column(Boolean, default=False)  # only True after user accepts
+    created_at     = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class AIPickAnalysis(Base):
+    """Detailed AI analysis result for a user's daily pick symbol."""
+    __tablename__ = "ai_pick_analyses"
+    id             = Column(Integer, primary_key=True, index=True)
+    user_id        = Column(Integer, nullable=False, index=True)
+    symbol         = Column(String(20), nullable=False)
+    trade_date     = Column(String(10), nullable=False)
+    signal         = Column(String(10), nullable=True)
+    confidence     = Column(Integer, nullable=True)
+    score          = Column(Float, nullable=True)
+    entry          = Column(Float, nullable=True)
+    exit_target    = Column(Float, nullable=True)
+    stop           = Column(Float, nullable=True)
+    risk_reward    = Column(Float, nullable=True)
+    reasoning      = Column(Text, nullable=True)
+    vs_ai_verdict  = Column(Text, nullable=True)   # honest comparison text
+    full_report    = Column(Text, nullable=True)   # JSON full analysis
+    created_at     = Column(DateTime, default=datetime.utcnow)
+
+
+class UserReviewLog(Base):
+    """Audit log of user reviewing and accepting AI suggestions."""
+    __tablename__ = "user_review_logs"
+    id              = Column(Integer, primary_key=True, index=True)
+    user_id         = Column(Integer, nullable=False, index=True)
+    recommendation_id = Column(Integer, nullable=True)
+    symbol          = Column(String(20), nullable=False)
+    action          = Column(String(20), nullable=False)  # reviewed | accepted | rejected
+    notes           = Column(String(300), nullable=True)
+    ip_address      = Column(String(50), nullable=True)
+    created_at      = Column(DateTime, default=datetime.utcnow, index=True)

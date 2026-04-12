@@ -8,12 +8,20 @@ export default function SafetyControls({ botStatus, onStatusChange }) {
   const [starting, setStarting] = useState(false)
   const [positions, setPositions] = useState([])
   const [pnl,      setPnl]      = useState(0)
-  const [msg,      setMsg]      = useState(null) // { text, type }
-  const [confirm,  setConfirm]  = useState(null) // 'emergency' | 'stop'
+  const [msg,      setMsg]      = useState(null)
+  const [confirm,  setConfirm]  = useState(null)
+  const [liveSettings, setLiveSettings] = useState(null)
 
   const isRunning = botStatus === 'running' || botStatus === 'started'
 
-  useEffect(() => { if (isRunning) loadPositions() }, [isRunning])
+  useEffect(() => {
+    if (isRunning) loadPositions()
+    loadSettings()
+  }, [isRunning])
+
+  async function loadSettings() {
+    try { const r = await api.get('/settings'); setLiveSettings(r.data) } catch {}
+  }
 
   function flash(text, type = 'success') {
     setMsg({ text, type })
@@ -257,8 +265,8 @@ export default function SafetyControls({ botStatus, onStatusChange }) {
         <div className="text-xs font-bold text-gray-400 mb-3">Your Current Risk Settings</div>
         <div className="grid grid-cols-2 gap-2 text-xs">
           {[
-            { label: 'Daily Target',     value: '$100 – $250',  color: 'text-green-400' },
-            { label: 'Max Daily Loss',   value: '$150',          color: 'text-red-400'   },
+            { label: 'Daily Target',     value: liveSettings ? `$${liveSettings.daily_target_min} – $${liveSettings.daily_target_max}` : '—', color: 'text-green-400' },
+              { label: 'Max Daily Loss',   value: liveSettings ? `$${liveSettings.max_daily_loss}` : '—', color: 'text-red-400'   },
             { label: 'Trading Mode',     value: 'Auto',          color: 'text-brand-500' },
             { label: 'Broker Mode',      value: 'Paper',         color: 'text-yellow-400'},
           ].map(({ label, value, color }) => (
@@ -269,7 +277,7 @@ export default function SafetyControls({ botStatus, onStatusChange }) {
           ))}
         </div>
         <p className="text-xs text-gray-600 mt-2">
-          The bot automatically stops if your daily loss exceeds $150. You can change these limits in Settings.
+          The bot automatically stops if your daily loss exceeds ${liveSettings?.max_daily_loss ?? 150}. You can change these limits in Settings.
         </p>
       </div>
 

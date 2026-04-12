@@ -31,6 +31,9 @@ class DailyTargetTracker:
         self._session_start: Optional[datetime] = None
         self._session_stop:  Optional[datetime] = None
         self._db_loaded       = False
+        # Trailing profit lock
+        self.locked_floor: Optional[float] = None
+        self.peak_pnl: float = 0.0
 
     def load_from_db(self, db_session=None):
         """
@@ -155,6 +158,8 @@ class DailyTargetTracker:
         self._trades.append(trade)
         emoji = "✅" if pnl > 0 else "❌"
         logger.info(f"{emoji} {symbol} closed | PnL=${pnl:.2f} | Day total=${self.realized_pnl:.2f}")
+        # Update trailing profit lock after every close
+        self.update_trailing_lock()
         return trade
 
     def update_unrealized(self, total_unrealized_pnl: float):
@@ -173,12 +178,52 @@ class DailyTargetTracker:
     def is_max_target_hit(self) -> bool:
         return self.realized_pnl >= self.target_max
 
+    def update_trailing_lock(self):
+        """
+        Call after each trade close. Raises the profit floor as gains grow.
+        Never stops just because target is hit — only stops on drawdown to floor.
+        """
+        pnl = self.realized_pnl
+
+        # Track peak
+        if pnl > self.peak_pnl:
+            self.peak_pnl = pnl
+
+        # Activate floor once min target is hit
+        if pnl >= self.target_min and self.locked_floor is None:
+            self.locked_floor = round(self.target_min * 0.97, 2)
+            logger.info(f"🔒 Stock profit lock activated: floor ${self.locked_floor:.2f}")
+
+        # Trail upward — floor rises as P&L grows, never drops
+        if self.locked_floor is not None and pnl > self.target_min:
+            trail_pct = 0.94 if pnl < self.target_max * 1.5 else 0.96
+            candidate = round(pnl * trail_pct, 2)
+            if candidate > self.locked_floor:
+                old = self.locked_floor
+                self.locked_floor = candidate
+                logger.info(
+                    f"🔒 Stock floor raised: ${old:.2f} → ${self.locked_floor:.2f} "
+                    f"(trailing {int(trail_pct*100)}% of ${pnl:.2f})"
+                )
+
     def should_stop(self) -> tuple[bool, str]:
         self._guard()
-        if self.realized_pnl >= self.target_max:
-            return True, f"Max target hit (${self.realized_pnl:.2f})"
-        if self.realized_pnl <= -config.MAX_DAILY_LOSS:
-            return True, f"Daily loss limit hit (${self.realized_pnl:.2f})"
+        pnl = self.realized_pnl
+        max_loss = config.MAX_DAILY_LOSS
+
+        # Hard loss limit
+        if pnl <= -max_loss:
+            return True, f"Daily loss limit hit (${pnl:.2f})"
+
+        # Trailing floor breach — protect locked gains
+        if self.locked_floor is not None and pnl < self.locked_floor:
+            return True, (
+                f"Trailing floor triggered — P&L ${pnl:.2f} dropped to "
+                f"floor ${self.locked_floor:.2f}. Gains protected ✅"
+            )
+
+        # No longer stop at max_target — keep trading while market is good
+        # The trailing floor handles protection automatically
         return False, ""
 
     def progress_pct(self) -> float:
@@ -207,6 +252,8 @@ class DailyTargetTracker:
             "progress_pct":     self.progress_pct(),
             "min_target_hit":   self.is_min_target_hit(),
             "max_target_hit":   self.is_max_target_hit(),
+            "locked_floor":     self.locked_floor,
+            "peak_pnl":         round(self.peak_pnl, 2),
             "trade_count":      len(self._trades),
             "wins":             wins,
             "losses":           losses,

@@ -85,6 +85,33 @@ except Exception as e:
     compliance_router = None
     _has_compliance   = False
     print(f"⚠️  Compliance routes not loaded: {e}")
+
+try:
+    from services.billing import router as billing_router
+    _has_billing = True
+    print("✅ Billing routes loaded")
+except Exception as e:
+    billing_router = None
+    _has_billing   = False
+    print(f"⚠️  Billing routes not loaded: {e}")
+
+try:
+    from services.alerts import router as alerts_router
+    _has_alerts = True
+    print("✅ Alerts routes loaded")
+except Exception as e:
+    alerts_router = None
+    _has_alerts   = False
+    print(f"⚠️  Alerts routes not loaded: {e}")
+
+try:
+    from services.daily_advisor import router as daily_router
+    _has_daily = True
+    print("✅ Daily advisor routes loaded")
+except Exception as e:
+    daily_router = None
+    _has_daily   = False
+    print(f"⚠️  Daily advisor routes not loaded: {e}")
 from data.ai_advisor      import AIAdvisor
 from data.dynamic_watchlist import DynamicWatchlistBuilder
 from data.market_scanner  import MarketScanner
@@ -164,11 +191,31 @@ async def daily_summary_sender():
         if now.hour == 16 and now.minute == 5 and now.weekday() < 5:
             try:
                 stats = tracker.stats()
-                # Would need to iterate users in a real multi-user setup
                 logger.info("Daily summary triggered")
             except Exception as e:
                 logger.error(f"daily_summary: {e}")
         await asyncio.sleep(60)
+
+
+_crypto_running = False
+
+async def crypto_engine_loop():
+    """Background loop that runs crypto/hybrid engine cycles when activated."""
+    global _hybrid_engine, _crypto_running
+    logger.info("Crypto engine loop started (idle until activated)")
+    while True:
+        try:
+            if _hybrid_engine is not None and _crypto_running:
+                result = await _hybrid_engine.run_cycle()
+                state  = result.get("crypto", {})
+                if isinstance(state, dict):
+                    engine_state = state.get("state", "idle")
+                    if engine_state == "stopped_for_day":
+                        logger.info(f"Crypto engine stopped for day: {state.get('stop_reason')}")
+                        _crypto_running = False
+        except Exception as e:
+            logger.error(f"crypto_engine_loop: {e}")
+        await asyncio.sleep(30)   # run cycle every 30 seconds
 
 
 @asynccontextmanager
@@ -180,6 +227,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(equity_recorder())
     asyncio.create_task(market_scan_loop())
     asyncio.create_task(daily_summary_sender())
+    asyncio.create_task(crypto_engine_loop())
     yield
     logger.info("Shutting down…")
     await bot_loop.stop()
@@ -225,6 +273,12 @@ if _has_admin and admin_router:
     app.include_router(admin_router)
 if _has_compliance and compliance_router:
     app.include_router(compliance_router)
+if _has_billing and billing_router:
+    app.include_router(billing_router)
+if _has_alerts and alerts_router:
+    app.include_router(alerts_router)
+if _has_daily and daily_router:
+    app.include_router(daily_router)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -285,6 +339,131 @@ async def start_bot(body: BotStartBody, user: User = Depends(get_current_user)):
 async def stop_bot(user: User = Depends(get_current_user)):
     await bot_loop.stop()
     return {"status": "stopped"}
+
+class EngineModeBody(BaseModel):
+    mode:         str   # stocks_only | crypto_only | hybrid
+    crypto_alloc: float = 0.30   # 0.0 – 1.0
+
+_hybrid_engine = None
+
+@app.post("/api/bot/engine-mode", tags=["Bot"])
+async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current_user)):
+    """Activate crypto or hybrid trading engine."""
+    global _hybrid_engine, _crypto_running
+    valid = ("stocks_only", "crypto_only", "hybrid")
+    if body.mode not in valid:
+        raise HTTPException(400, f"mode must be one of: {valid}")
+
+    if body.mode == "stocks_only":
+        _crypto_running  = False
+        _hybrid_engine   = None
+        settings.set_engine_settings(
+            settings._data.get("stop_new_trades_hour", 15),
+            settings._data.get("stop_new_trades_minute", 30),
+            settings._data.get("max_open_positions", 3),
+            "stocks_only", body.crypto_alloc,
+        )
+        return {"status": "stocks_only_active", "crypto_running": False,
+                "message": "Crypto engine stopped. Stock engine continues normally."}
+
+    # Get broker — priority: 1) bot_loop if running, 2) user saved keys, 3) .env fallback
+    broker = bot_loop.broker
+    if not broker:
+        try:
+            from broker.alpaca_client import AlpacaClient
+            from broker.broker_routes import _get_broker_creds
+            import config as _cfg
+
+            # Try user's saved broker keys first (from My Broker tab)
+            creds = _get_broker_creds(user, db)
+            if creds and creds.get("api_key"):
+                mode   = getattr(user, "alpaca_mode", "paper") or "paper"
+                broker = AlpacaClient(creds["api_key"], creds["api_secret"], mode)
+                logger.info(f"Crypto engine using user saved broker keys (mode={mode})")
+            elif _cfg.ALPACA_API_KEY:
+                # Fall back to .env keys
+                broker = AlpacaClient(_cfg.ALPACA_API_KEY,
+                                      getattr(_cfg, 'ALPACA_SECRET_KEY', ''),
+                                      getattr(_cfg, 'ALPACA_MODE', 'paper'))
+                logger.info("Crypto engine using .env broker keys")
+            else:
+                raise HTTPException(400,
+                    "No broker keys found. Add your Alpaca API keys in My Broker tab or .env file.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Could not connect broker: {e}")
+
+    try:
+        from strategy.hybrid_engine import HybridEngine
+        _hybrid_engine = HybridEngine(
+            broker           = broker,
+            settings         = settings,
+            tracker          = tracker,
+            stock_engine     = getattr(bot_loop, "engine", None),
+            mode             = body.mode,
+            crypto_alloc_pct = body.crypto_alloc,
+        )
+        _crypto_running = True
+        settings.set_engine_settings(
+            settings._data.get("stop_new_trades_hour", 15),
+            settings._data.get("stop_new_trades_minute", 30),
+            settings._data.get("max_open_positions", 3),
+            body.mode,
+            body.crypto_alloc,
+        )
+        logger.info(f"Crypto/Hybrid engine STARTED: mode={body.mode} alloc={body.crypto_alloc:.0%}")
+    except Exception as e:
+        logger.error(f"Hybrid engine init: {e}")
+        raise HTTPException(500, str(e))
+
+    return {
+        "status":        "started",
+        "mode":          body.mode,
+        "crypto_alloc":  body.crypto_alloc,
+        "stock_alloc":   round(1.0 - body.crypto_alloc, 2),
+        "crypto_running":True,
+        "message":       f"{'Hybrid' if body.mode == 'hybrid' else 'Crypto'} engine activated — scanning every 30s",
+    }
+
+
+@app.post("/api/bot/engine-stop", tags=["Bot"])
+async def stop_engine_mode(user: User = Depends(get_current_user)):
+    """Stop the crypto/hybrid engine."""
+    global _hybrid_engine, _crypto_running
+    _crypto_running = False
+    _hybrid_engine  = None
+    return {"status": "stopped", "message": "Crypto engine stopped"}
+
+@app.get("/api/bot/engine-status", tags=["Bot"])
+async def get_engine_status(user: User = Depends(get_current_user)):
+    """Get hybrid engine status including crypto engine state machine."""
+    global _hybrid_engine, _crypto_running
+    saved_mode = settings._data.get("engine_mode", "stocks_only")
+    if _hybrid_engine is None:
+        return {
+            "mode":          saved_mode,
+            "crypto_running":False,
+            "hybrid":        None,
+            "crypto":        None,
+            "configured":    False,
+            "message":       "Crypto engine not started. Use the Start Crypto button.",
+        }
+    status = _hybrid_engine.get_status()
+    return {
+        **status,
+        "crypto_running": _crypto_running,
+        "configured":     True,
+    }
+
+@app.post("/api/bot/crypto/cycle", tags=["Bot"])
+async def run_crypto_cycle(user: User = Depends(get_current_user)):
+    """Manually trigger one crypto engine cycle (for testing)."""
+    global _hybrid_engine
+    if _hybrid_engine is None:
+        raise HTTPException(400, "Set engine mode first via /api/bot/engine-mode")
+    result = await _hybrid_engine.run_cycle()
+    return result
 
 @app.get("/api/status",      tags=["Bot"])
 async def get_status(user: User = Depends(get_current_user)):
@@ -516,13 +695,58 @@ async def get_today(user: User = Depends(get_current_user), db: Session = Depend
     return svc.get_today_stats()
 
 @app.get("/api/analytics/pdt", tags=["Analytics"])
-async def get_pdt(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    equity = 0
-    if bot_loop.broker:
-        acct   = bot_loop.broker.get_account()
-        equity = acct.get("equity", 0)
-    pdt = PDTTracker(db, user.id, equity)
-    return pdt.check()
+async def get_pdt(user: User = Depends(get_current_user)):
+    """
+    Full PDT compliance status from live Alpaca account.
+    Returns daytrade_count, buying power, exempt status, and recommendations.
+    """
+    if not bot_loop.broker:
+        # Try standalone client
+        try:
+            from broker.alpaca_client import AlpacaClient
+            import config as _cfg
+            _broker = AlpacaClient(_cfg.ALPACA_API_KEY,
+                                   getattr(_cfg, 'ALPACA_SECRET_KEY', ''),
+                                   getattr(_cfg, 'ALPACA_MODE', 'paper'))
+        except Exception:
+            return {"error": "Connect your broker to check PDT status"}
+    else:
+        _broker = bot_loop.broker
+
+    try:
+        from strategy.pdt_engine import PDTComplianceEngine
+        pdt_engine = PDTComplianceEngine(_broker)
+        summary    = pdt_engine.account_summary()
+
+        # Add human-readable recommendations
+        recs = []
+        if summary["is_pdt_exempt"]:
+            recs.append("✅ Your account is PDT exempt — trade freely")
+        else:
+            remaining = summary["day_trades_remaining"]
+            if remaining == 0:
+                recs.append("⛔ Day trade limit reached — all new entries must be held overnight")
+                recs.append("💡 Consider crypto positions — not subject to PDT rules")
+                recs.append("💡 Or add funds to bring equity above $25,000")
+            elif remaining == 1:
+                recs.append("⚠️ Only 1 day trade remaining — use it carefully")
+                recs.append("💡 Consider holding existing positions overnight to reset tomorrow")
+            else:
+                recs.append(f"✅ {remaining} day trades available today")
+
+            if summary["equity"] < 2000:
+                recs.append("⚠️ Account under $2,000 — limited to 1x buying power (cash only)")
+            elif summary["equity"] < 25000:
+                recs.append(f"ℹ️ Account multiplier: {summary['account_multiplier']}x buying power")
+
+        summary["recommendations"] = recs
+        return summary
+
+    except Exception as e:
+        logger.error(f"PDT check error: {e}")
+        # Fallback to basic account data
+        acct = _broker.get_account()
+        return {**acct, "error": str(e)}
 
 @app.post("/api/analytics/backtest", tags=["Analytics"])
 async def run_backtest(
@@ -596,6 +820,51 @@ async def unusual_volume(user: User = Depends(get_current_user)):
 async def run_scan(user: User = Depends(get_current_user)):
     return await mkt_scanner.scan()
 
+@app.get("/api/scanner/search", tags=["Scanner"])
+async def symbol_search(q: str = "", user: User = Depends(get_current_user)):
+    """Live symbol autocomplete search."""
+    q = q.upper().strip()
+    if not q:
+        return []
+    SYMBOLS = [
+        {"symbol":"AAPL","name":"Apple Inc."},{"symbol":"TSLA","name":"Tesla Inc."},
+        {"symbol":"NVDA","name":"NVIDIA Corp."},{"symbol":"AMD","name":"Advanced Micro Devices"},
+        {"symbol":"META","name":"Meta Platforms"},{"symbol":"AMZN","name":"Amazon.com"},
+        {"symbol":"MSFT","name":"Microsoft Corp."},{"symbol":"GOOGL","name":"Alphabet Inc."},
+        {"symbol":"SPY","name":"S&P 500 ETF"},{"symbol":"QQQ","name":"Nasdaq-100 ETF"},
+        {"symbol":"NFLX","name":"Netflix Inc."},{"symbol":"DIS","name":"Walt Disney Co."},
+        {"symbol":"BAC","name":"Bank of America"},{"symbol":"JPM","name":"JPMorgan Chase"},
+        {"symbol":"UBER","name":"Uber Technologies"},{"symbol":"SHOP","name":"Shopify Inc."},
+        {"symbol":"COIN","name":"Coinbase Global"},{"symbol":"PLTR","name":"Palantir Technologies"},
+        {"symbol":"NIO","name":"NIO Inc."},{"symbol":"RIVN","name":"Rivian Automotive"},
+        {"symbol":"LCID","name":"Lucid Group"},{"symbol":"GME","name":"GameStop Corp."},
+        {"symbol":"AMC","name":"AMC Entertainment"},{"symbol":"SOFI","name":"SoFi Technologies"},
+        {"symbol":"SMCI","name":"Super Micro Computer"},{"symbol":"ARM","name":"Arm Holdings"},
+        {"symbol":"AVGO","name":"Broadcom Inc."},{"symbol":"INTC","name":"Intel Corp."},
+        {"symbol":"MU","name":"Micron Technology"},{"symbol":"QCOM","name":"Qualcomm Inc."},
+        {"symbol":"ORCL","name":"Oracle Corp."},{"symbol":"CRM","name":"Salesforce Inc."},
+        {"symbol":"NOW","name":"ServiceNow Inc."},{"symbol":"SNOW","name":"Snowflake Inc."},
+        {"symbol":"ROKU","name":"Roku Inc."},{"symbol":"PYPL","name":"PayPal Holdings"},
+        {"symbol":"V","name":"Visa Inc."},{"symbol":"MA","name":"Mastercard Inc."},
+        {"symbol":"GS","name":"Goldman Sachs"},{"symbol":"XOM","name":"Exxon Mobil"},
+        {"symbol":"F","name":"Ford Motor Co."},{"symbol":"GM","name":"General Motors"},
+        {"symbol":"BA","name":"Boeing Co."},{"symbol":"HOOD","name":"Robinhood Markets"},
+        {"symbol":"BTC","name":"Bitcoin"},{"symbol":"ETH","name":"Ethereum"},
+        {"symbol":"SOL","name":"Solana"},{"symbol":"DOGE","name":"Dogecoin"},
+        {"symbol":"ADA","name":"Cardano"},{"symbol":"LINK","name":"Chainlink"},
+        {"symbol":"BB","name":"BlackBerry Ltd."},{"symbol":"SPOT","name":"Spotify"},
+        {"symbol":"SQ","name":"Block Inc."},{"symbol":"MS","name":"Morgan Stanley"},
+        {"symbol":"CVX","name":"Chevron Corp."},{"symbol":"LMT","name":"Lockheed Martin"},
+        {"symbol":"SNAP","name":"Snap Inc."},{"symbol":"RBLX","name":"Roblox Corp."},
+        {"symbol":"ABNB","name":"Airbnb Inc."},{"symbol":"LYFT","name":"Lyft Inc."},
+        {"symbol":"ZM","name":"Zoom Video"},{"symbol":"DOCU","name":"DocuSign Inc."},
+    ]
+    results = [s for s in SYMBOLS if s["symbol"].startswith(q) or q in s["name"].upper()]
+    # Also allow any 1-5 char ticker as a valid entry
+    if q and not results:
+        results = [{"symbol": q, "name": f"${q} (custom)"}]
+    return results[:10]
+
 @app.get("/api/scanner/gainers", tags=["Scanner"])
 async def gainers(n: int = 10, user: User = Depends(get_current_user)):
     return mkt_scanner.get_top_gainers(n)
@@ -647,6 +916,39 @@ async def update_targets(body: TargetsBody,
     user.max_daily_loss     = body.max_daily_loss
     db.commit()
     return {**settings.get_targets(), "status": "updated"}
+
+
+class EngineSettingsBody(BaseModel):
+    stop_new_trades_hour:   int   = 15
+    stop_new_trades_minute: int   = 30
+    max_open_positions:     int   = 3
+    engine_mode:            str   = "stocks_only"   # stocks_only | crypto_only | hybrid
+    crypto_alloc_pct:       float = 0.30
+
+@app.put("/api/settings/engine", tags=["Settings"])
+async def update_engine_settings(
+    body: EngineSettingsBody,
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Save engine mode, trading hours, max positions, crypto allocation."""
+    if body.engine_mode not in ("stocks_only", "crypto_only", "hybrid"):
+        raise HTTPException(400, "engine_mode must be stocks_only | crypto_only | hybrid")
+    if not (0 <= body.stop_new_trades_hour <= 23):
+        raise HTTPException(400, "Invalid stop hour")
+    if not (1 <= body.max_open_positions <= 10):
+        raise HTTPException(400, "max_open_positions must be 1–10")
+    if not (0.0 <= body.crypto_alloc_pct <= 1.0):
+        raise HTTPException(400, "crypto_alloc_pct must be 0.0–1.0")
+
+    settings.set_engine_settings(
+        body.stop_new_trades_hour,
+        body.stop_new_trades_minute,
+        body.max_open_positions,
+        body.engine_mode,
+        body.crypto_alloc_pct,
+    )
+    return {**settings.all(), "status": "engine_settings_saved"}
 
 @app.get("/api/watchlist",              tags=["Watchlist"])
 async def get_watchlist(user: User = Depends(get_current_user)):
@@ -1031,16 +1333,40 @@ async def get_active_watchlist(user: User = Depends(get_current_user)):
 
 @app.post("/api/ai/symbol-sentiment", tags=["Analysis"])
 async def ai_symbol_sentiment(
-    body: dict,
-    user: User = Depends(get_current_user)
+    body:    dict,
+    request: Request,
+    user:    User    = Depends(get_current_user),
+    db:      Session = Depends(get_db),
 ):
     """
     Full AI analysis for a symbol: entry/exit strategy, indicators, sentiment.
-    Reads live bars + all indicators and returns structured trading intelligence.
+    Results are cached per tier to control OpenAI costs.
+    Admin-configurable refresh intervals per plan.
     """
     symbol = (body.get("symbol") or "").upper()
     if not symbol:
         raise HTTPException(400, "symbol required")
+
+    is_admin = getattr(user, "is_admin", False)
+    tier     = "admin" if is_admin else (getattr(user, "subscription_tier", "free") or "free")
+
+    # ── Cache check — save OpenAI costs ──────────────────────────────────────
+    try:
+        from services.ai_cache import AIAnalysisCache, is_ai_enabled, get_refresh_interval
+        cache = AIAnalysisCache(db)
+
+        if not is_ai_enabled(db):
+            raise HTTPException(503, "AI analysis is currently disabled by admin")
+
+        cached = cache.get_cached(symbol, "sentiment", tier, is_admin=is_admin)
+        if cached:
+            logger.info(f"AI cache HIT: {symbol} for tier={tier} — age {cached.get('_cache_age_s')}s")
+            return cached
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Cache check failed: {e} — proceeding to API call")
+        cache = None
 
     try:
         from data.indicators        import add_all_indicators, score_symbol
@@ -1179,9 +1505,28 @@ async def ai_symbol_sentiment(
             "regime":    regime,
             "vwap":      vwap,
             "generated_at": str(df5.index[-1]) if hasattr(df5.index[-1], "isoformat") else "",
+            "_cached":   False,
+            "_tier":     tier,
         }
 
-    except HTTPException:
+        # ── Store in cache ────────────────────────────────────────────────────
+        try:
+            if cache:
+                cache.store(symbol, "sentiment", result, user_id=user.id)
+        except Exception as ce:
+            logger.warning(f"Cache store failed: {ce}")
+
+        # ── Generate trade alert if strong signal ─────────────────────────────
+        try:
+            from services.alerts import maybe_create_alert
+            from database.models import CompanySettings
+            min_conf_setting = db.query(CompanySettings).filter_by(key="alert_confidence_min").first()
+            min_conf = int(min_conf_setting.value) if min_conf_setting else 65
+            maybe_create_alert(db, user.id, symbol, result, min_confidence=min_conf)
+        except Exception as ae:
+            logger.warning(f"Alert creation failed: {ae}")
+
+        return result
         raise
     except Exception as e:
         logger.error(f"ai_symbol_sentiment({symbol}): {e}")
@@ -1243,3 +1588,121 @@ async def get_symbol_bars(
     except Exception as e:
         logger.error(f"get_symbol_bars({symbol}): {e}")
         return []
+
+
+# ── Trade Alerts ──────────────────────────────────────────────────────────────
+
+@app.get("/api/alerts", tags=["Alerts"])
+async def get_alerts(
+    limit:  int  = 50,
+    unread: bool = False,
+    user:   User = Depends(get_current_user),
+    db:     Session = Depends(get_db),
+):
+    """Get trade alerts for the current user."""
+    from database.models import TradeAlert
+    q = db.query(TradeAlert).filter_by(user_id=user.id)
+    if unread:
+        q = q.filter_by(is_read=False)
+    alerts = q.order_by(TradeAlert.created_at.desc()).limit(limit).all()
+    return [
+        {
+            "id":         a.id,
+            "symbol":     a.symbol,
+            "alert_type": a.alert_type,
+            "signal":     a.signal,
+            "price":      a.price,
+            "target":     a.target,
+            "stop":       a.stop,
+            "confidence": a.confidence,
+            "message":    a.message,
+            "is_read":    a.is_read,
+            "created_at": a.created_at.isoformat(),
+        }
+        for a in alerts
+    ]
+
+
+@app.get("/api/alerts/count", tags=["Alerts"])
+async def get_alert_count(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Unread alert count — called frequently for the bell badge."""
+    from database.models import TradeAlert
+    count = db.query(TradeAlert).filter_by(user_id=user.id, is_read=False).count()
+    return {"unread": count}
+
+
+@app.post("/api/alerts/read", tags=["Alerts"])
+async def mark_alerts_read(
+    body: dict,
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Mark one or all alerts as read."""
+    from database.models import TradeAlert
+    alert_id = body.get("id")
+    if alert_id:
+        db.query(TradeAlert).filter_by(id=alert_id, user_id=user.id).update({"is_read": True})
+    else:
+        db.query(TradeAlert).filter_by(user_id=user.id, is_read=False).update({"is_read": True})
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.get("/api/alerts/today", tags=["Alerts"])
+async def get_today_alerts(
+    symbol: str  = "",
+    user:   User = Depends(get_current_user),
+    db:     Session = Depends(get_db),
+):
+    """All alerts for today — used in the day summary panel."""
+    from database.models import TradeAlert
+    from datetime import date
+    today_str = datetime.utcnow().date().isoformat()
+    q = db.query(TradeAlert).filter(
+        TradeAlert.user_id    == user.id,
+        TradeAlert.created_at >= today_str,
+    )
+    if symbol:
+        q = q.filter(TradeAlert.symbol == symbol.upper())
+    alerts = q.order_by(TradeAlert.created_at.desc()).all()
+    return [
+        {
+            "id":         a.id,
+            "symbol":     a.symbol,
+            "alert_type": a.alert_type,
+            "signal":     a.signal,
+            "price":      a.price,
+            "target":     a.target,
+            "stop":       a.stop,
+            "confidence": a.confidence,
+            "message":    a.message,
+            "is_read":    a.is_read,
+            "created_at": a.created_at.isoformat(),
+        }
+        for a in alerts
+    ]
+
+
+# ── AI Cache Config ───────────────────────────────────────────────────────────
+
+@app.get("/api/ai/cache-status/{symbol}", tags=["Analysis"])
+async def ai_cache_status(
+    symbol: str,
+    user:   User    = Depends(get_current_user),
+    db:     Session = Depends(get_db),
+):
+    """How fresh is the cached AI analysis for this symbol + current tier."""
+    from services.ai_cache import AIAnalysisCache, get_refresh_interval
+    is_admin = getattr(user, "is_admin", False)
+    tier     = "admin" if is_admin else (getattr(user, "subscription_tier", "free") or "free")
+    cache    = AIAnalysisCache(db)
+    status   = cache.get_cache_status(symbol.upper(), "sentiment", tier)
+    return {
+        **status,
+        "tier":     tier,
+        "is_admin": is_admin,
+        "upgrade_for_realtime": not is_admin and tier == "free",
+    }

@@ -8,11 +8,12 @@ from datetime import datetime
 import pytz
 
 import config
-from broker.alpaca_client import AlpacaClient
-from data.indicators import add_all_indicators
-from models.ensemble import EnsembleModel
+from broker.alpaca_client  import AlpacaClient
+from data.indicators       import add_all_indicators
+from models.ensemble       import EnsembleModel
 from strategy.daily_target import DailyTargetTracker
 from strategy.risk_manager import DynamicRiskManager
+from strategy.pdt_engine   import PDTComplianceEngine
 
 logger = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
@@ -30,9 +31,10 @@ class StrategyEngine:
         self.tracker  = tracker
         self.risk     = risk
         self.ensemble = ensemble
+        self.pdt      = PDTComplianceEngine(broker)
 
-        self._signals: dict[str, dict] = {}   # latest signal per symbol
-        self._open:    dict[str, dict] = {}   # open positions we opened
+        self._signals: dict[str, dict] = {}
+        self._open:    dict[str, dict] = {}
 
     # ── Main scan ─────────────────────────────────────────────────────────────
 
@@ -108,11 +110,24 @@ class StrategyEngine:
 
         side = signal["signal"]   # "BUY" or "SELL"
 
-        # IMPORTANT: Only take LONG positions for retail paper trading
-        # Short selling requires margin approval and is disabled by default
+        # Only LONG positions for retail paper trading
         if side != "BUY":
             logger.debug(f"Skipping {side} signal for {symbol} — only BUY (long) trades enabled")
             return
+
+        # ── PDT Compliance Check ──────────────────────────────────────────────
+        pdt_check = self.pdt.check_before_entry(symbol, sizing["qty"], price)
+        if not pdt_check.get("allowed", False):
+            logger.warning(f"PDT BLOCK: {symbol} — {pdt_check['reason']}")
+            return
+
+        if pdt_check.get("action") == "enter_hold_overnight":
+            logger.warning(f"PDT OVERNIGHT: {symbol} — entering but MUST hold overnight: {pdt_check['reason']}")
+            # Mark position as must-hold so exit engine won't close it today
+            signal["pdt_hold_overnight"] = True
+
+        if pdt_check.get("warning"):
+            logger.warning(f"PDT WARNING: {symbol} — {pdt_check['reason']}")
 
         order = self.broker.place_bracket_order(
             symbol      = symbol,
@@ -208,6 +223,20 @@ class StrategyEngine:
         )
 
         if exit_flag:
+            # ── PDT Exit Check ────────────────────────────────────────────
+            entry_date = str(pos.get("entry_date", ""))
+            pdt_exit   = self.pdt.check_before_exit(symbol, entry_date)
+
+            if not pdt_exit.get("allowed", True):
+                logger.warning(f"PDT EXIT BLOCKED: {symbol} — {pdt_exit['reason']} — holding overnight")
+                # Don't close — mark as hold overnight
+                pos["pdt_hold_overnight"] = True
+                return
+
+            if pos.get("pdt_hold_overnight") and pdt_exit.get("is_day_trade"):
+                logger.warning(f"PDT OVERNIGHT HOLD active for {symbol} — skipping intraday exit")
+                return
+
             self.broker.close_position(symbol)
             trade = self.tracker.record_close(
                 symbol     = symbol,

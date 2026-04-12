@@ -15,6 +15,11 @@ from alpaca.trading.requests import (
 )
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
+try:
+    from alpaca.data.requests import CryptoBarsRequest, CryptoLatestQuoteRequest
+    _HAS_CRYPTO = True
+except ImportError:
+    _HAS_CRYPTO = False
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 import config
@@ -49,14 +54,23 @@ class AlpacaClient:
 
     def get_account(self) -> dict:
         try:
-            acct = self.trading.get_account()
+            acct   = self.trading.get_account()
             equity = float(acct.equity)
+            dt_count = int(getattr(acct, 'daytrade_count', 0))
+            pdt_exempt = equity >= 25_000
             return {
-                "buying_power":    float(acct.buying_power),
-                "equity":          equity,
-                "cash":            float(acct.cash),
-                "portfolio_value": float(acct.portfolio_value),
-                "pnl_today":       equity - config.CAPITAL,
+                "buying_power":         float(acct.buying_power),
+                "equity":               equity,
+                "cash":                 float(acct.cash),
+                "portfolio_value":      float(acct.portfolio_value),
+                "pnl_today":            equity - config.CAPITAL,
+                "daytrade_count":       dt_count,
+                "day_trades_remaining": max(0, 3 - dt_count) if not pdt_exempt else 999,
+                "is_pdt_exempt":        pdt_exempt,
+                "pattern_day_trader":   getattr(acct, 'pattern_day_trader', False),
+                "account_multiplier":   2.0 if equity >= 2_000 else 1.0,
+                "must_hold_overnight":  not pdt_exempt and dt_count >= 3,
+                "pdt_warning":          not pdt_exempt and dt_count >= 2,
             }
         except Exception as e:
             logger.error(f"get_account error: {e}")
@@ -86,8 +100,15 @@ class AlpacaClient:
     # ── Market Data ───────────────────────────────────────────────────────────
 
     def get_bars(self, symbol: str, timeframe: str = "1Min", limit: int = 300) -> pd.DataFrame:
+        # Route to crypto if symbol looks like crypto
+        symbol_up = symbol.upper().replace("-", "/")
+        is_crypto = "/" in symbol_up or symbol_up in {
+            "BTC","ETH","SOL","DOGE","LINK","LTC","BCH","AAVE","UNI","ADA"
+        }
+        if is_crypto:
+            return self.get_crypto_bars(symbol_up.split("/")[0], timeframe, limit)
         try:
-            tf = _TF_MAP.get(timeframe, _TF_MAP["1Min"])
+            tf  = _TF_MAP.get(timeframe, _TF_MAP["1Min"])
             req = StockBarsRequest(
                 symbol_or_symbols=symbol,
                 timeframe=tf,
@@ -95,7 +116,7 @@ class AlpacaClient:
                 limit=limit,
             )
             bars = self.data.get_stock_bars(req)
-            df = bars.df
+            df   = bars.df
             if isinstance(df.index, pd.MultiIndex):
                 df = df.xs(symbol, level=0)
             df.index = pd.to_datetime(df.index)
@@ -103,6 +124,50 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"get_bars({symbol}) error: {e}")
             return pd.DataFrame()
+
+    def get_crypto_bars(self, symbol: str, timeframe: str = "1Min", limit: int = 300) -> pd.DataFrame:
+        """Get OHLCV bars for crypto using stock bars endpoint with crypto symbol."""
+        try:
+            tf  = _TF_MAP.get(timeframe, _TF_MAP["1Min"])
+            req = StockBarsRequest(
+                symbol_or_symbols=symbol.upper(),
+                timeframe=tf,
+                start=datetime.now(timezone.utc) - timedelta(days=2),
+                limit=limit,
+            )
+            bars = self.data.get_stock_bars(req)
+            df   = bars.df
+            if isinstance(df.index, pd.MultiIndex):
+                df = df.xs(symbol.upper(), level=0)
+            df.index = pd.to_datetime(df.index)
+            # Normalize column names (Alpaca sometimes uses different cases)
+            df.columns = [c.lower() for c in df.columns]
+            available = [c for c in ["open","high","low","close","volume"] if c in df.columns]
+            if len(available) < 3:
+                return pd.DataFrame()
+            return df[available].copy()
+        except Exception as e:
+            logger.debug(f"get_crypto_bars({symbol}): {e}")
+            return pd.DataFrame()
+
+    def get_latest_crypto_price(self, symbol: str) -> float:
+        """Get latest price for a crypto symbol."""
+        if not _HAS_CRYPTO:
+            return 0.0
+        try:
+            from alpaca.data import CryptoHistoricalDataClient
+            from alpaca.data.requests import CryptoLatestQuoteRequest
+            pair   = symbol.upper()
+            if "/" not in pair:
+                pair = f"{pair}/USD"
+            client = CryptoHistoricalDataClient()
+            req    = CryptoLatestQuoteRequest(symbol_or_symbols=pair)
+            quote  = client.get_crypto_latest_quote(req)
+            q      = quote[pair]
+            return float((q.ask_price + q.bid_price) / 2) if q.ask_price else float(q.bid_price)
+        except Exception as e:
+            logger.debug(f"get_latest_crypto_price({symbol}): {e}")
+            return 0.0
 
     def get_latest_price(self, symbol: str) -> float:
         try:
