@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../hooks/useAuth'
 import {
   Shield, Users, FileText, Settings, Activity, AlertTriangle,
@@ -456,10 +456,103 @@ const DOC_TYPES = [
   { value: 'about',     label: 'About Us' },
 ]
 
+function RichEditor({ value, onChange }) {
+  const editorRef  = useRef(null)
+  const quillRef   = useRef(null)
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    // Load Quill CSS
+    if (!document.getElementById('quill-css')) {
+      const link = document.createElement('link')
+      link.id   = 'quill-css'
+      link.rel  = 'stylesheet'
+      link.href = 'https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.snow.min.css'
+      document.head.appendChild(link)
+    }
+    // Load Quill JS
+    if (window.Quill) { initQuill(); return }
+    const script   = document.createElement('script')
+    script.src     = 'https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.min.js'
+    script.onload  = initQuill
+    document.head.appendChild(script)
+
+    function initQuill() {
+      if (!editorRef.current || quillRef.current) return
+      quillRef.current = new window.Quill(editorRef.current, {
+        theme: 'snow',
+        modules: {
+          toolbar: [
+            [{ header: [1, 2, 3, false] }],
+            ['bold', 'italic', 'underline', 'strike'],
+            [{ color: [] }, { background: [] }],
+            [{ list: 'ordered' }, { list: 'bullet' }],
+            [{ indent: '-1' }, { indent: '+1' }],
+            [{ align: [] }],
+            ['link', 'image'],
+            ['blockquote', 'code-block'],
+            ['clean'],
+          ],
+        },
+        placeholder: 'Write your legal document here…',
+      })
+
+      // Set initial content
+      if (value) quillRef.current.root.innerHTML = value
+
+      // Listen for changes
+      quillRef.current.on('text-change', () => {
+        onChange(quillRef.current.root.innerHTML)
+      })
+
+      setReady(true)
+    }
+
+    return () => { quillRef.current = null }
+  }, [])
+
+  // Sync external value changes (e.g. loading existing doc)
+  useEffect(() => {
+    if (quillRef.current && value !== quillRef.current.root.innerHTML) {
+      quillRef.current.root.innerHTML = value || ''
+    }
+  }, [value])
+
+  return (
+    <div>
+      <style>{`
+        .ql-toolbar { background:#1a2740; border:1px solid #374151; border-radius:10px 10px 0 0; }
+        .ql-container { background:#111d33; border:1px solid #374151; border-top:none; border-radius:0 0 10px 10px; min-height:320px; font-size:14px; }
+        .ql-editor { color:#e5e7eb; min-height:300px; }
+        .ql-editor.ql-blank::before { color:#6b7280; }
+        .ql-stroke { stroke:#9ca3af !important; }
+        .ql-fill { fill:#9ca3af !important; }
+        .ql-picker-label { color:#9ca3af !important; }
+        .ql-picker-options { background:#1a2740; border-color:#374151; }
+        .ql-picker-item { color:#e5e7eb; }
+        .ql-toolbar button:hover .ql-stroke, .ql-toolbar button.ql-active .ql-stroke { stroke:#00C896 !important; }
+        .ql-toolbar button:hover .ql-fill, .ql-toolbar button.ql-active .ql-fill { fill:#00C896 !important; }
+        .ql-snow .ql-tooltip { background:#1a2740; border-color:#374151; color:#e5e7eb; }
+        .ql-snow .ql-tooltip input { background:#111d33; border-color:#374151; color:#e5e7eb; }
+        .ql-editor h1,.ql-editor h2,.ql-editor h3 { color:#fff; }
+        .ql-editor a { color:#00C896; }
+        .ql-editor blockquote { border-left:3px solid #374151; color:#9ca3af; }
+      `}</style>
+      <div ref={editorRef}/>
+      {!ready && (
+        <div className="text-xs text-gray-500 text-center py-4">Loading editor…</div>
+      )}
+    </div>
+  )
+}
+
 function LegalTab() {
   const [docs, setDocs]       = useState([])
   const [editing, setEditing] = useState(null)
-  const [form, setForm]       = useState({ doc_type: 'tos', title: '', content: '' })
+  const [form, setForm]       = useState({
+    doc_type: 'tos', title: '', content: '',
+    show_in_footer: false, show_in_nav: false, show_in_signup: false, footer_order: 0
+  })
   const [saving, setSaving]   = useState(false)
   const [msg, setMsg]         = useState('')
 
@@ -471,12 +564,20 @@ function LegalTab() {
 
   function startEdit(doc) {
     setEditing(doc.id)
-    setForm({ doc_type: doc.doc_type, title: doc.title, content: doc.content })
+    setForm({
+      doc_type:       doc.doc_type,
+      title:          doc.title,
+      content:        doc.content,
+      show_in_footer: doc.show_in_footer || false,
+      show_in_nav:    doc.show_in_nav    || false,
+      show_in_signup: doc.show_in_signup || false,
+      footer_order:   doc.footer_order   || 0,
+    })
   }
 
   function startNew() {
     setEditing('new')
-    setForm({ doc_type: 'tos', title: '', content: '' })
+    setForm({ doc_type: 'tos', title: '', content: '', show_in_footer: false, show_in_nav: false, show_in_signup: false, footer_order: 0 })
   }
 
   async function save() {
@@ -524,14 +625,76 @@ function LegalTab() {
             </div>
           </div>
           <div>
-            <label className="text-xs text-gray-400">Content (HTML supported)</label>
-            <textarea value={form.content} onChange={e => setForm(f => ({...f, content: e.target.value}))}
-              rows={16}
-              placeholder="Enter legal document content here. HTML is supported."
-              className="w-full mt-1 bg-dark-700 border border-dark-600 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-brand-500 resize-none font-mono"/>
+            <label className="text-xs text-gray-400 mb-1 block">Content — Rich Text Editor</label>
+            <RichEditor
+              value={form.content}
+              onChange={content => setForm(f => ({...f, content}))}
+            />
+            <div className="mt-1 flex items-center gap-2">
+              <button
+                onClick={() => {
+                  const win = window.open('', '_blank')
+                  win.document.write(`<html><head><title>Preview</title></head><body style="font-family:sans-serif;padding:2rem;max-width:800px;margin:0 auto">${form.content}</body></html>`)
+                  win.document.close()
+                }}
+                className="text-xs text-brand-400 hover:underline flex items-center gap-1"
+              >
+                <Eye size={11}/> Preview in new tab
+              </button>
+              <span className="text-xs text-gray-600">· Supports headings, bold, italic, lists, links, images</span>
+            </div>
           </div>
-          <div className="bg-yellow-900/20 border border-yellow-800/40 rounded-xl p-3 text-xs text-yellow-400">
-            ⚠️ Publishing a new version deactivates the current one. The old version is kept in history for legal record.
+          <div className="bg-dark-700 border border-dark-600 rounded-xl p-4 space-y-3">
+            <div className="text-xs font-bold text-white mb-2">📍 Visibility — Where should this document appear?</div>
+            <div className="grid grid-cols-3 gap-3">
+              <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
+                form.show_in_footer ? 'bg-brand-500/10 border-brand-500/40' : 'bg-dark-800 border-dark-600 hover:border-dark-500'
+              }`}>
+                <input type="checkbox" checked={form.show_in_footer}
+                  onChange={e => setForm(f => ({...f, show_in_footer: e.target.checked}))}
+                  className="mt-0.5 w-4 h-4 flex-shrink-0"/>
+                <div>
+                  <div className="text-sm font-bold text-white">Footer</div>
+                  <div className="text-xs text-gray-500 mt-0.5">Link appears in site footer for all users</div>
+                </div>
+              </label>
+              <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
+                form.show_in_nav ? 'bg-brand-500/10 border-brand-500/40' : 'bg-dark-800 border-dark-600 hover:border-dark-500'
+              }`}>
+                <input type="checkbox" checked={form.show_in_nav}
+                  onChange={e => setForm(f => ({...f, show_in_nav: e.target.checked}))}
+                  className="mt-0.5 w-4 h-4 flex-shrink-0"/>
+                <div>
+                  <div className="text-sm font-bold text-white">Navigation</div>
+                  <div className="text-xs text-gray-500 mt-0.5">Link appears in top navigation bar</div>
+                </div>
+              </label>
+              <label className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
+                form.show_in_signup ? 'bg-brand-500/10 border-brand-500/40' : 'bg-dark-800 border-dark-600 hover:border-dark-500'
+              }`}>
+                <input type="checkbox" checked={form.show_in_signup}
+                  onChange={e => setForm(f => ({...f, show_in_signup: e.target.checked}))}
+                  className="mt-0.5 w-4 h-4 flex-shrink-0"/>
+                <div>
+                  <div className="text-sm font-bold text-white">Signup Flow</div>
+                  <div className="text-xs text-gray-500 mt-0.5">Required reading during registration</div>
+                </div>
+              </label>
+            </div>
+            {form.show_in_footer && (
+              <div className="flex items-center gap-3">
+                <label className="text-xs text-gray-400 flex-shrink-0">Footer order:</label>
+                <input type="number" value={form.footer_order} min={0} max={20}
+                  onChange={e => setForm(f => ({...f, footer_order: parseInt(e.target.value) || 0}))}
+                  className="w-20 bg-dark-800 border border-dark-600 rounded-lg px-2 py-1 text-white text-sm"/>
+                <span className="text-xs text-gray-500">Lower = appears first in footer</span>
+              </div>
+            )}
+            {!form.show_in_footer && !form.show_in_nav && !form.show_in_signup && (
+              <div className="text-xs text-yellow-400 bg-yellow-900/20 border border-yellow-800/40 rounded-lg p-2">
+                ⚠️ No visibility selected — document will be hidden (useful for internal drafts or signup-only docs)
+              </div>
+            )}
           </div>
           <button onClick={save} disabled={saving}
             className="flex items-center gap-2 px-5 py-2.5 bg-brand-500 hover:bg-brand-600 text-dark-900 font-bold rounded-xl text-sm disabled:opacity-50">
@@ -553,13 +716,19 @@ function LegalTab() {
             <Card key={d.id}>
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
                     <span className="font-bold text-white">{d.title}</span>
                     <span className="text-xs bg-green-900/30 text-green-400 px-1.5 py-0.5 rounded">Active</span>
                     <span className="text-xs text-gray-600">v{d.version}</span>
+                    {d.show_in_footer && <span className="text-xs bg-blue-900/30 text-blue-400 border border-blue-800/40 px-1.5 py-0.5 rounded">📍 Footer</span>}
+                    {d.show_in_nav    && <span className="text-xs bg-purple-900/30 text-purple-400 border border-purple-800/40 px-1.5 py-0.5 rounded">🔗 Nav</span>}
+                    {d.show_in_signup && <span className="text-xs bg-yellow-900/30 text-yellow-400 border border-yellow-800/40 px-1.5 py-0.5 rounded">📋 Signup</span>}
+                    {!d.show_in_footer && !d.show_in_nav && !d.show_in_signup && (
+                      <span className="text-xs bg-dark-700 text-gray-500 px-1.5 py-0.5 rounded">Hidden</span>
+                    )}
                   </div>
                   <div className="text-xs text-gray-500">
-                    Type: {DOC_TYPES.find(t => t.value === d.doc_type)?.label} ·
+                    {DOC_TYPES.find(t => t.value === d.doc_type)?.label} ·
                     Hash: <span className="font-mono">{d.content_hash?.slice(0, 16)}…</span> ·
                     Updated: {timeAgo(d.updated_at)}
                   </div>
