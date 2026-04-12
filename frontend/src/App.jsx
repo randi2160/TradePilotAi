@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react'
-import { AuthProvider, useAuth } from './hooks/useAuth'
-import { useWebSocket }          from './hooks/useWebSocket'
-import { getTrades, addSymbol }  from './services/api'
-
+import { AuthProvider, useAuth, api } from './hooks/useAuth'
+import { useWebSocket }               from './hooks/useWebSocket'
+import { getTrades, addSymbol }       from './services/api'
 import LoginPage            from './components/LoginPage'
 import Dashboard            from './components/Dashboard'
 import ChartView            from './components/ChartView'
@@ -31,6 +30,8 @@ import CopyTrading          from './components/CopyTrading'
 import IPOIntelligence      from './components/IPOIntelligence'
 import AdminPanel          from './components/AdminPanel'
 import SafetyControls      from './components/SafetyControls'
+import ConsentFlow         from './components/ConsentFlow'
+import SymbolPage          from './components/SymbolPage'
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
@@ -64,13 +65,20 @@ const TABS = [
 function TradingApp() {
   const { user, token, loading } = useAuth()
   const { data, connected }      = useWebSocket(token)
-  const [tab,    setTab]         = useState('dashboard')
-  const [trades, setTrades]      = useState([])
+  const [tab,          setTab]          = useState('dashboard')
+  const [needsConsent, setNeedsConsent] = useState(null)
+  const [trades,       setTrades]       = useState([])
+  const [activeSymbol, setActiveSymbol] = useState(null)
 
   useEffect(() => {
     const handler = (e) => setTab(e.detail)
     window.addEventListener('navigate', handler)
-    return () => window.removeEventListener('navigate', handler)
+    const symHandler = (e) => setActiveSymbol(e.detail)
+    window.addEventListener('openSymbol', symHandler)
+    return () => {
+      window.removeEventListener('navigate', handler)
+      window.removeEventListener('openSymbol', symHandler)
+    }
   }, [])
 
   useEffect(() => {
@@ -79,6 +87,14 @@ function TradingApp() {
     const iv = setInterval(() => getTrades().then(setTrades).catch(() => {}), 10000)
     return () => clearInterval(iv)
   }, [token])
+
+  // Compliance check — must be here before any conditional returns
+  useEffect(() => {
+    if (!user) return
+    api.get('/compliance/status')
+      .then(r => setNeedsConsent(!r.data.onboarding_complete))
+      .catch(() => setNeedsConsent(false)) // if route fails, don't block dashboard
+  }, [user?.id])
 
   if (loading) return (
     <div className="min-h-screen bg-dark-900 flex items-center justify-center">
@@ -90,6 +106,16 @@ function TradingApp() {
   )
 
   if (!user) return <LoginPage />
+
+  if (needsConsent === null) return (
+    <div className="min-h-screen bg-dark-900 flex items-center justify-center">
+      <div className="animate-spin w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full"/>
+    </div>
+  )
+
+  if (needsConsent) return (
+    <ConsentFlow user={user} onComplete={() => setNeedsConsent(false)}/>
+  )
 
   const pnl         = data?.total_pnl ?? data?.realized_pnl ?? 0
   const running     = data?.bot_status === 'running'
@@ -109,10 +135,9 @@ function TradingApp() {
 
       {/* Header */}
       <header className="bg-dark-800 border-b border-dark-600 px-4 py-2.5 flex items-center gap-3 flex-shrink-0">
-        <span className="text-xl">📈</span>
+        <img src="/logo-mark.svg" alt="Morviq AI" className="w-8 h-8 flex-shrink-0"/>
         <div className="hidden sm:block">
-          <h1 className="font-black text-white leading-none text-sm">Morviq AI</h1>
-          <p className="text-xs text-gray-500">Intelligence · Patience · Freedom</p>
+          <img src="/logo.svg" alt="Morviq AI — AI That Trades. Wealth That Grows." className="h-8 w-auto"/>
         </div>
         <div className={`px-3 py-1 rounded-full text-sm font-bold ${pnl >= 0 ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>
           {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} today
@@ -215,6 +240,20 @@ function TradingApp() {
       <footer className="text-center py-2 text-xs text-gray-700 border-t border-dark-800">
         Morviq AI v4 · Secured · PostgreSQL · GPT-4 · Not financial advice
       </footer>
+
+      {/* Symbol Board Overlay */}
+      {activeSymbol && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          onClick={e => e.target === e.currentTarget && setActiveSymbol(null)}>
+          <div className="w-full max-w-2xl h-[85vh] flex flex-col">
+            <SymbolPage
+              symbol={activeSymbol}
+              currentUserId={user?.id}
+              onClose={() => setActiveSymbol(null)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }

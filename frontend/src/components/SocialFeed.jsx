@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { api } from '../hooks/useAuth'
 import { Heart, MessageCircle, Copy, Users, RefreshCw, Bell, TrendingUp, TrendingDown, Shield, Plus, X, Send } from 'lucide-react'
+import { openSymbolBoard, parseSymbolsInText } from '../utils/symbolUtils'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -107,7 +108,10 @@ function BroadcastCard({ b, myId, following, onLike, onFollow, onCopy }) {
       {/* Trade card */}
       <div className="bg-dark-900/50 rounded-xl p-3 space-y-2">
         <div className="flex items-center gap-3">
-          <span className="font-black text-white text-2xl">{b.symbol}</span>
+          <button onClick={() => openSymbolBoard(b.symbol)}
+            className="font-black text-white text-2xl hover:text-brand-400 transition-colors cursor-pointer">
+            ${b.symbol}
+          </button>
           <span className={`text-sm font-black ${ac.color}`}>{ac.icon} {ac.label}</span>
           {b.qty > 0 && <span className="text-xs text-gray-400">{b.qty} shares</span>}
           {b.pnl !== null && b.pnl !== undefined && (
@@ -492,9 +496,17 @@ export default function SocialFeed({ currentUserId }) {
   async function joinGroup(id) {
     try {
       const r = await api.post(`/social/groups/${id}/join`)
-      flash(`✅ Joined ${r.data.group}`)
+      if (r.data.status === 'already_member') {
+        flash('ℹ️ You are already a member of this group')
+      } else {
+        flash(`✅ Joined ${r.data.group || 'group'}!`)
+      }
       loadGroups()
-    } catch(e) { flash('❌ ' + (e.response?.data?.detail ?? e.message)) }
+    } catch(e) {
+      const msg = e.response?.data?.detail ?? e.message ?? 'Failed to join'
+      flash('❌ ' + msg)
+      console.error('Join group error:', e.response?.data || e)
+    }
   }
 
   async function saveProfile() {
@@ -693,10 +705,12 @@ export default function SocialFeed({ currentUserId }) {
                 <p className="text-xs text-gray-500 mt-0.5">{g.description || 'No description'}</p>
                 <p className="text-xs text-gray-600 mt-0.5">👥 {g.members} members</p>
               </div>
-              <button onClick={() => joinGroup(g.id)}
-                className="text-xs px-3 py-2 bg-brand-500/20 text-brand-400 border border-brand-500/30 hover:bg-brand-500/30 rounded-lg font-bold transition-all">
-                Join
-              </button>
+              <div className="flex gap-2">
+                <button onClick={() => joinGroup(g.id)}
+                  className="text-xs px-3 py-2 bg-brand-500/20 text-brand-400 border border-brand-500/30 hover:bg-brand-500/30 rounded-lg font-bold transition-all">
+                  Join
+                </button>
+              </div>
             </div>
           ))}
         </div>

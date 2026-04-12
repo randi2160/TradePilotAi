@@ -149,8 +149,7 @@ export default function LiveTicker({ watchlist = [] }) {
 
   function handleClick(e, sym) {
     e.stopPropagation()
-    if (popup?.symbol === sym) { setPopup(null); return }
-    setPopup({ symbol: sym, x: Math.min(e.clientX - 180, window.innerWidth - 420), y: e.clientY + 12 })
+    window.dispatchEvent(new CustomEvent('openSymbol', { detail: sym }))
   }
 
   if (items.length === 0) return null

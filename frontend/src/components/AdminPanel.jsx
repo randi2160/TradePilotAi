@@ -344,19 +344,21 @@ function UsersTab() {
 // ── Tab: Audit Logs ───────────────────────────────────────────────────────────
 
 function AuditTab() {
-  const [logs, setLogs]       = useState([])
-  const [total, setTotal]     = useState(0)
-  const [severity, setSeverity] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [verified, setVerified] = useState(null)
+  const [logs,      setLogs]      = useState([])
+  const [total,     setTotal]     = useState(0)
+  const [severity,  setSeverity]  = useState('')
+  const [loading,   setLoading]   = useState(true)
+  const [verified,  setVerified]  = useState(null)
   const [verifying, setVerifying] = useState(false)
+  const [selected,  setSelected]  = useState(null)
+  const [exporting, setExporting] = useState(false)
 
   useEffect(() => { load() }, [severity])
 
   async function load() {
     setLoading(true)
     try {
-      const r = await api.get(`/admin/audit-logs?limit=50&severity=${severity}`)
+      const r = await api.get(`/admin/audit-logs?limit=100&severity=${severity}`)
       setLogs(r.data.logs)
       setTotal(r.data.total)
     } catch (e) { console.error(e) }
@@ -370,11 +372,100 @@ function AuditTab() {
     finally { setVerifying(false) }
   }
 
+  function exportTxt() {
+    const lines = logs.map(l =>
+      `[${l.timestamp}] [${l.severity.toUpperCase()}] ${l.event}\n` +
+      `  User: ${l.user_email || 'N/A'} (#${l.user_id || 'N/A'}) | IP: ${l.ip || 'N/A'}\n` +
+      `  Payload: ${JSON.stringify(l.payload || {})}\n` +
+      `  Hash: ${l.hash}\n` +
+      `  Prev:  ${l.prev_hash}\n` +
+      `${'─'.repeat(80)}`
+    ).join('\n')
+
+    const header = `MORVIQ AI — AUDIT LOG EXPORT\nExported: ${new Date().toISOString()}\nTotal entries: ${total}\nShowing: ${logs.length}\n${'═'.repeat(80)}\n\n`
+    const blob = new Blob([header + lines], { type: 'text/plain' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `morviq-audit-${new Date().toISOString().slice(0,10)}.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function exportCsv() {
+    const header = 'timestamp,severity,event,user_id,user_email,ip,payload,hash,prev_hash\n'
+    const rows   = logs.map(l =>
+      [l.timestamp, l.severity, l.event, l.user_id || '', l.user_email || '',
+       l.ip || '', JSON.stringify(l.payload || {}).replace(/"/g, '""'),
+       l.hash, l.prev_hash
+      ].map(v => `"${v}"`).join(',')
+    ).join('\n')
+    const blob = new Blob([header + rows], { type: 'text/csv' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `morviq-audit-${new Date().toISOString().slice(0,10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function exportPdf() {
+    const win = window.open('', '_blank')
+    const rows = logs.map(l => `
+      <tr style="border-bottom:1px solid #e5e7eb">
+        <td style="padding:6px 8px;font-size:11px;white-space:nowrap">${new Date(l.timestamp).toLocaleString()}</td>
+        <td style="padding:6px 8px">
+          <span style="background:${l.severity==='critical'?'#fee2e2':l.severity==='warning'?'#fef9c3':'#dbeafe'};
+            color:${l.severity==='critical'?'#991b1b':l.severity==='warning'?'#854d0e':'#1e40af'};
+            padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">
+            ${l.severity.toUpperCase()}
+          </span>
+        </td>
+        <td style="padding:6px 8px;font-size:11px;font-weight:600">${l.event}</td>
+        <td style="padding:6px 8px;font-size:11px">${l.user_email || l.user_id || '—'}</td>
+        <td style="padding:6px 8px;font-size:10px;color:#6b7280">${l.ip || '—'}</td>
+        <td style="padding:6px 8px;font-size:10px;font-family:monospace;color:#6b7280">${l.hash?.slice(0,12)}…</td>
+      </tr>`
+    ).join('')
+
+    win.document.write(`<!DOCTYPE html><html><head>
+      <title>Morviq AI — Audit Log Export</title>
+      <style>
+        body{font-family:Arial,sans-serif;margin:0;padding:20px;color:#111}
+        h1{font-size:18px;margin-bottom:4px}
+        .meta{color:#666;font-size:12px;margin-bottom:20px}
+        table{width:100%;border-collapse:collapse;font-size:12px}
+        th{background:#f9fafb;padding:8px;text-align:left;font-size:11px;color:#374151;border-bottom:2px solid #e5e7eb}
+        tr:nth-child(even){background:#f9fafb}
+        @media print{.no-print{display:none}}
+      </style>
+    </head><body>
+      <div style="display:flex;justify-content:space-between;align-items:start">
+        <div>
+          <h1>🛡️ Morviq AI — Audit Log Export</h1>
+          <div class="meta">Exported: ${new Date().toLocaleString()} · Total shown: ${logs.length} of ${total} entries · Chain status: ${verified?.intact ? '✅ Verified intact' : '⚠️ Not verified'}</div>
+        </div>
+        <button class="no-print" onclick="window.print()" style="padding:8px 16px;background:#1d4ed8;color:white;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨️ Print / Save PDF</button>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Timestamp</th><th>Severity</th><th>Event</th><th>User</th><th>IP</th><th>Hash</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="margin-top:20px;padding:12px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;font-size:11px;color:#6b7280">
+        This audit log is hash-chained. Each entry's hash includes the previous entry's hash, making tampering detectable.
+        Document generated by Morviq AI Compliance System on ${new Date().toISOString()}.
+      </div>
+    </body></html>`)
+    win.document.close()
+  }
+
   return (
     <div className="space-y-4">
 
       {/* Toolbar */}
-      <div className="flex gap-3 items-center">
+      <div className="flex gap-2 items-center flex-wrap">
         <select value={severity} onChange={e => setSeverity(e.target.value)}
           className="bg-dark-700 border border-dark-600 rounded-xl px-3 py-2 text-sm text-white focus:outline-none">
           <option value="">All Severities</option>
@@ -385,21 +476,32 @@ function AuditTab() {
         <button onClick={load} className="px-3 py-2 bg-dark-700 rounded-xl border border-dark-600 hover:bg-dark-600">
           <RefreshCw size={14} className={`text-gray-400 ${loading ? 'animate-spin' : ''}`}/>
         </button>
-        <div className="ml-auto flex items-center gap-3">
-          <div className="text-xs text-gray-500">{total} total events</div>
+        <div className="ml-auto flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-gray-500">{total} total events</span>
           <button onClick={verify} disabled={verifying}
-            className="flex items-center gap-1.5 text-xs px-3 py-2 bg-dark-700 hover:bg-dark-600 text-gray-400 border border-dark-600 rounded-xl transition-colors">
-            <Shield size={12}/> {verifying ? 'Verifying…' : 'Verify Chain Integrity'}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 bg-dark-700 hover:bg-dark-600 text-gray-400 border border-dark-600 rounded-xl">
+            <Shield size={12}/> {verifying ? 'Verifying…' : 'Verify Chain'}
+          </button>
+          {/* Export buttons */}
+          <button onClick={exportTxt}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 bg-dark-700 hover:bg-dark-600 text-gray-400 border border-dark-600 rounded-xl">
+            <Download size={12}/> TXT
+          </button>
+          <button onClick={exportCsv}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 bg-dark-700 hover:bg-dark-600 text-gray-400 border border-dark-600 rounded-xl">
+            <Download size={12}/> CSV
+          </button>
+          <button onClick={exportPdf}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 bg-brand-500/20 hover:bg-brand-500/30 text-brand-400 border border-brand-500/30 rounded-xl font-bold">
+            <Download size={12}/> PDF
           </button>
         </div>
       </div>
 
-      {/* Chain Verification Result */}
+      {/* Chain Verification */}
       {verified && (
         <div className={`p-3 rounded-xl border text-sm flex items-center gap-3 ${
-          verified.intact
-            ? 'bg-green-900/20 border-green-800/40 text-green-400'
-            : 'bg-red-900/20 border-red-800/40 text-red-400'
+          verified.intact ? 'bg-green-900/20 border-green-800/40 text-green-400' : 'bg-red-900/20 border-red-800/40 text-red-400'
         }`}>
           {verified.intact ? <CheckCircle size={16}/> : <XCircle size={16}/>}
           <div>
@@ -411,40 +513,104 @@ function AuditTab() {
         </div>
       )}
 
-      {/* Log Table */}
-      <div className="space-y-1.5">
-        {logs.map((l, i) => (
-          <div key={i} className={`flex items-start gap-3 p-3 rounded-xl border text-xs ${SEV_COLOR[l.severity] ?? SEV_COLOR.info}`}>
-            <span className="text-base flex-shrink-0">{eventIcon(l.event)}</span>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-bold">{l.event}</span>
-                <span className="opacity-60">#{l.user_id}</span>
-                {l.user_email && <span className="opacity-60">{l.user_email}</span>}
-                <span className="opacity-50">{l.ip}</span>
-              </div>
-              {Object.keys(l.payload || {}).length > 0 && (
-                <div className="mt-1 opacity-60 font-mono truncate">
-                  {JSON.stringify(l.payload).slice(0, 80)}
+      {/* Split view: list + detail */}
+      <div className={`grid gap-4 ${selected ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        {/* Log list */}
+        <div className="space-y-1.5 max-h-[600px] overflow-y-auto">
+          {logs.map((l, i) => (
+            <div key={i}
+              onClick={() => setSelected(selected?.id === l.id ? null : l)}
+              className={`flex items-start gap-3 p-3 rounded-xl border text-xs cursor-pointer transition-all ${
+                selected?.id === l.id
+                  ? 'ring-1 ring-brand-500 ' + (SEV_COLOR[l.severity] ?? SEV_COLOR.info)
+                  : (SEV_COLOR[l.severity] ?? SEV_COLOR.info) + ' hover:opacity-80'
+              }`}>
+              <span className="text-base flex-shrink-0">{eventIcon(l.event)}</span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold">{l.event}</span>
+                  {l.user_email && <span className="opacity-60 truncate">{l.user_email}</span>}
                 </div>
-              )}
-              <div className="mt-0.5 opacity-40 font-mono">hash: {l.hash?.slice(0, 20)}…</div>
-            </div>
-            <div className="opacity-60 flex-shrink-0 text-right">
-              <div>{timeAgo(l.timestamp)}</div>
-              <div className={`px-1.5 py-0.5 rounded text-center mt-1 font-bold ${SEV_COLOR[l.severity]}`}>
+                <div className="opacity-50 mt-0.5 truncate">{l.ip} · {timeAgo(l.timestamp)}</div>
+              </div>
+              <span className={`px-1.5 py-0.5 rounded font-bold flex-shrink-0 ${SEV_COLOR[l.severity]}`}>
                 {l.severity}
+              </span>
+            </div>
+          ))}
+          {!loading && logs.length === 0 && (
+            <div className="text-center py-12 text-gray-500">No audit logs found</div>
+          )}
+        </div>
+
+        {/* Individual log detail */}
+        {selected && (
+          <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 space-y-3 self-start sticky top-0">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-white text-sm">Log Detail</span>
+              <button onClick={() => setSelected(null)} className="text-gray-500 hover:text-white text-xs">✕ Close</button>
+            </div>
+
+            <div className={`p-2.5 rounded-lg border text-xs font-bold ${SEV_COLOR[selected.severity]}`}>
+              {eventIcon(selected.event)} {selected.event}
+            </div>
+
+            <div className="space-y-2 text-xs">
+              {[
+                ['Timestamp',  new Date(selected.timestamp).toLocaleString()],
+                ['Severity',   selected.severity],
+                ['User ID',    selected.user_id || '—'],
+                ['Email',      selected.user_email || '—'],
+                ['IP Address', selected.ip || '—'],
+              ].map(([k, v]) => (
+                <div key={k} className="flex gap-2">
+                  <span className="text-gray-500 w-24 flex-shrink-0">{k}</span>
+                  <span className="text-white font-medium">{v}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Payload */}
+            {Object.keys(selected.payload || {}).length > 0 && (
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Payload</div>
+                <pre className="bg-dark-700 rounded-lg p-3 text-xs text-gray-300 overflow-auto max-h-32 font-mono whitespace-pre-wrap">
+                  {JSON.stringify(selected.payload, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            {/* Hash chain */}
+            <div className="border-t border-dark-600 pt-3 space-y-1">
+              <div className="text-xs text-gray-500 mb-1">Hash Chain (tamper-proof)</div>
+              <div className="text-xs font-mono">
+                <div className="text-gray-600">prev: <span className="text-gray-400">{selected.prev_hash?.slice(0,32)}…</span></div>
+                <div className="text-green-400">this: <span>{selected.hash?.slice(0,32)}…</span></div>
               </div>
             </div>
+
+            {/* Export single entry */}
+            <button
+              onClick={() => {
+                const text = `MORVIQ AI — AUDIT LOG ENTRY\n${'═'.repeat(40)}\nEvent:     ${selected.event}\nTimestamp: ${selected.timestamp}\nSeverity:  ${selected.severity}\nUser:      ${selected.user_email || selected.user_id || 'N/A'}\nIP:        ${selected.ip || 'N/A'}\nPayload:   ${JSON.stringify(selected.payload || {}, null, 2)}\n\nHash Chain:\n  Prev: ${selected.prev_hash}\n  This: ${selected.hash}\n`
+                const blob = new Blob([text], { type: 'text/plain' })
+                const url  = URL.createObjectURL(blob)
+                const a    = document.createElement('a')
+                a.href     = url
+                a.download = `audit-entry-${selected.id}.txt`
+                a.click()
+                URL.revokeObjectURL(url)
+              }}
+              className="w-full text-xs py-2 bg-dark-700 hover:bg-dark-600 text-gray-400 border border-dark-600 rounded-lg flex items-center justify-center gap-1.5">
+              <Download size={11}/> Export This Entry
+            </button>
           </div>
-        ))}
-        {!loading && logs.length === 0 && (
-          <div className="text-center py-12 text-gray-500">No audit logs found</div>
         )}
       </div>
     </div>
   )
 }
+
 
 // ── Tab: Legal Documents ──────────────────────────────────────────────────────
 
