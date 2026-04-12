@@ -138,3 +138,41 @@ def migrate_compliance():
 if __name__ == "__main__":
     migrate()
     migrate_compliance()
+
+LEGAL_DOC_COLUMNS = [
+    ("slug",           "TEXT DEFAULT ''"),
+    ("show_in_footer", "INTEGER DEFAULT 0"),
+    ("show_in_nav",    "INTEGER DEFAULT 0"),
+    ("show_in_signup", "INTEGER DEFAULT 0"),
+    ("footer_order",   "INTEGER DEFAULT 0"),
+]
+
+def migrate_legal_docs():
+    if not os.path.exists(DB_PATH):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    tables = [r[0] for r in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    if "legal_documents" not in tables:
+        print("legal_documents table not yet created — run Base.metadata.create_all first")
+        conn.close()
+        return
+    print("📦 Migrating legal_documents columns...")
+    existing = get_existing_columns(cursor, "legal_documents")
+    for col, defn in LEGAL_DOC_COLUMNS:
+        if col not in existing:
+            try:
+                cursor.execute(f"ALTER TABLE legal_documents ADD COLUMN {col} {defn}")
+                print(f"  ✅ legal_documents.{col} added")
+            except Exception as e:
+                print(f"  ⚠️  {col}: {e}")
+        else:
+            print(f"  ✓  legal_documents.{col} already exists")
+    conn.commit()
+    conn.close()
+    print("✅ Legal docs migration done")
+
+if __name__ == "__main__":
+    migrate()
+    migrate_compliance()
+    migrate_legal_docs()

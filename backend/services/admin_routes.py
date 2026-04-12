@@ -265,10 +265,15 @@ async def list_legal_docs(
 
 
 class LegalDocBody(BaseModel):
-    doc_type: str = Field(..., description="tos | privacy | risk | cookies | about")
-    title:    str
-    content:  str = Field(..., description="HTML content of the legal document")
-    version:  Optional[str] = None
+    doc_type:       str = Field(..., description="tos | privacy | risk | cookies | about")
+    title:          str
+    content:        str = Field(..., description="HTML content of the legal document")
+    version:        Optional[str] = None
+    slug:           Optional[str] = None
+    show_in_footer: bool = False
+    show_in_nav:    bool = False
+    show_in_signup: bool = False
+    footer_order:   int  = 0
 
 
 @router.post("/legal")
@@ -279,7 +284,6 @@ async def create_legal_doc(
     db:      Session = Depends(get_db),
 ):
     """Create or update a legal document. Old version stays in history."""
-    # Deactivate current active version
     db.query(LegalDocument).filter_by(doc_type=body.doc_type, is_active=True).update(
         {"is_active": False}
     )
@@ -287,14 +291,22 @@ async def create_legal_doc(
     version      = body.version or datetime.utcnow().strftime("%Y-%m-%d")
     content_hash = hashlib.sha256(body.content.encode()).hexdigest()
 
+    # Auto-generate slug if not provided
+    slug = body.slug or body.title.lower().replace(" ", "-").replace("'", "")
+
     doc = LegalDocument(
-        doc_type     = body.doc_type,
-        version      = version,
-        title        = body.title,
-        content      = body.content,
-        is_active    = True,
-        content_hash = content_hash,
-        updated_by   = admin.id,
+        doc_type       = body.doc_type,
+        version        = version,
+        title          = body.title,
+        slug           = slug,
+        content        = body.content,
+        is_active      = True,
+        show_in_footer = body.show_in_footer,
+        show_in_nav    = body.show_in_nav,
+        show_in_signup = body.show_in_signup,
+        footer_order   = body.footer_order,
+        content_hash   = content_hash,
+        updated_by     = admin.id,
     )
     db.add(doc)
     db.commit()
@@ -303,11 +315,32 @@ async def create_legal_doc(
     AuditService(db).log(
         AuditEvent.ADMIN_CONTENT_UPDATED, admin.id, admin.email,
         get_ip(request),
-        payload={"doc_type": body.doc_type, "version": version, "content_hash": content_hash},
-        severity="info",
+        payload={"doc_type": body.doc_type, "version": version,
+                 "footer": body.show_in_footer, "nav": body.show_in_nav, "signup": body.show_in_signup},
     )
-
     return {"id": doc.id, "version": version, "content_hash": content_hash, "status": "published"}
+
+
+@router.patch("/legal/{doc_id}/visibility")
+async def update_visibility(
+    doc_id:  int,
+    body:    dict,
+    request: Request,
+    admin:   User    = Depends(require_admin),
+    db:      Session = Depends(get_db),
+):
+    """Update visibility of an existing active document without creating a new version."""
+    doc = db.query(LegalDocument).filter_by(id=doc_id).first()
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    if "show_in_footer" in body: doc.show_in_footer = body["show_in_footer"]
+    if "show_in_nav"    in body: doc.show_in_nav    = body["show_in_nav"]
+    if "show_in_signup" in body: doc.show_in_signup = body["show_in_signup"]
+    if "footer_order"   in body: doc.footer_order   = body["footer_order"]
+    db.commit()
+    AuditService(db).log(AuditEvent.ADMIN_CONTENT_UPDATED, admin.id, admin.email,
+                         get_ip(request), payload={"doc_id": doc_id, "visibility": body})
+    return {"status": "updated"}
 
 
 @router.get("/legal/{doc_type}/active")
@@ -320,12 +353,39 @@ async def get_active_doc(
     if not doc:
         raise HTTPException(404, f"No active {doc_type} document found")
     return {
-        "doc_type":     doc.doc_type,
-        "version":      doc.version,
-        "title":        doc.title,
-        "content":      doc.content,
-        "content_hash": doc.content_hash,
-        "updated_at":   doc.updated_at.isoformat() if doc.updated_at else "",
+        "doc_type":      doc.doc_type,
+        "version":       doc.version,
+        "title":         doc.title,
+        "slug":          doc.slug,
+        "content":       doc.content,
+        "content_hash":  doc.content_hash,
+        "show_in_footer":doc.show_in_footer,
+        "show_in_nav":   doc.show_in_nav,
+        "show_in_signup":doc.show_in_signup,
+        "updated_at":    doc.updated_at.isoformat() if doc.updated_at else "",
+    }
+
+
+@router.get("/legal/public/navigation")
+async def get_nav_docs(db: Session = Depends(get_db)):
+    """Public — get all docs marked for footer or nav (used by frontend to build links)."""
+    docs = db.query(LegalDocument).filter(
+        LegalDocument.is_active == True,
+    ).order_by(LegalDocument.footer_order).all()
+
+    return {
+        "footer": [
+            {"title": d.title, "doc_type": d.doc_type, "slug": d.slug}
+            for d in docs if d.show_in_footer
+        ],
+        "nav": [
+            {"title": d.title, "doc_type": d.doc_type, "slug": d.slug}
+            for d in docs if d.show_in_nav
+        ],
+        "signup": [
+            {"title": d.title, "doc_type": d.doc_type, "slug": d.slug}
+            for d in docs if d.show_in_signup
+        ],
     }
 
 

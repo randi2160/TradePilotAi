@@ -413,16 +413,21 @@ class ConsentRecord(Base):
 class LegalDocument(Base):
     __tablename__ = "legal_documents"
 
-    id           = Column(Integer, primary_key=True, index=True)
-    doc_type     = Column(String(50), nullable=False, index=True)
-    version      = Column(String(20), nullable=False)
-    title        = Column(String(200), nullable=False)
-    content      = Column(Text, nullable=False)
-    is_active    = Column(Boolean, default=True)
-    created_at   = Column(DateTime, default=datetime.utcnow)
-    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    updated_by   = Column(Integer, nullable=True)
-    content_hash = Column(String(64), nullable=False, default="")
+    id             = Column(Integer, primary_key=True, index=True)
+    doc_type       = Column(String(50), nullable=False, index=True)
+    version        = Column(String(20), nullable=False)
+    title          = Column(String(200), nullable=False)
+    slug           = Column(String(100), nullable=True)   # e.g. "terms-of-service"
+    content        = Column(Text, nullable=False)
+    is_active      = Column(Boolean, default=True)
+    show_in_footer = Column(Boolean, default=False)       # appears in site footer
+    show_in_nav    = Column(Boolean, default=False)       # appears in top navigation
+    show_in_signup = Column(Boolean, default=False)       # shown during user signup/onboarding
+    footer_order   = Column(Integer, default=0)           # sort order in footer
+    created_at     = Column(DateTime, default=datetime.utcnow)
+    updated_at     = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by     = Column(Integer, nullable=True)
+    content_hash   = Column(String(64), nullable=False, default="")
 
 
 class CompanySettings(Base):
