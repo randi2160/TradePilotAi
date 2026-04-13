@@ -146,17 +146,19 @@ class HybridEngine:
     def init_crypto_engine(self, account: dict, split: dict) -> CryptoEngine:
         """Create/update crypto engine with fresh account state."""
         targets = self._get_targets()
+        # Use configured capital from settings, NOT Alpaca's full paper equity
+        configured_capital = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
         engine  = CryptoEngine(
             broker            = self.broker,
             target_min        = targets["min"],
             target_desired    = targets["desired"],
             target_stretch    = targets["stretch"],
             max_daily_loss    = targets["loss"],
-            capital           = account.get("equity", 5000),
+            capital           = configured_capital,
             crypto_alloc      = split["crypto_pct"],
-            min_scalp_profit  = max(10, targets["min"] * 0.05),   # 5% of min target
+            min_scalp_profit  = 5,    # $5 min per scalp — realistic for small budget
             compound_mode     = True,
-            min_probability   = 0.60,
+            min_probability   = 0.40, # lowered threshold — matches crypto_engine default
             max_positions     = 2,
         )
         return engine
@@ -180,8 +182,10 @@ class HybridEngine:
                 if self.crypto_engine is None or self.crypto_engine.state == CryptoState.STOPPED:
                     self.crypto_engine = self.init_crypto_engine(acct, split)
                 else:
-                    # Update allocation if split changed
-                    self.crypto_engine.allocated_capital = acct.get("equity", 5000) * split["crypto_pct"]
+                    # Update allocation using configured capital, not Alpaca paper equity
+                    configured = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
+                    self.crypto_engine.allocated_capital = configured * split["crypto_pct"]
+                    self.crypto_engine.capital           = configured
                     self.crypto_engine.compounded_gains  = max(0, self.crypto_engine.compounded_gains)
 
                 results["crypto"] = await self.crypto_engine.run_cycle()

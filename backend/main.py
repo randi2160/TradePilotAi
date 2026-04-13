@@ -128,6 +128,8 @@ from services.daily_report  import DailyReporter
 from strategy.daily_target  import DailyTargetTracker
 import config
 
+import logging.handlers as _log_handlers
+
 logging.basicConfig(
     level   = logging.INFO,
     format  = "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -137,6 +139,23 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+# Separate ERROR-only crash log — survives restarts, rotates at 5MB
+_crash_handler = _log_handlers.RotatingFileHandler(
+    "autotrader_errors.log", maxBytes=5*1024*1024, backupCount=3, encoding="utf-8"
+)
+_crash_handler.setLevel(logging.ERROR)
+_crash_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+logging.getLogger().addHandler(_crash_handler)
+
+# Catch unhandled exceptions and write them to the crash log
+import sys as _sys
+def _log_unhandled(exc_type, exc_value, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        _sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    logger.critical("UNHANDLED EXCEPTION — SERVER CRASH", exc_info=(exc_type, exc_value, exc_tb))
+_sys.excepthook = _log_unhandled
 
 # ── Rate limiter ─────────────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
@@ -231,7 +250,7 @@ async def crypto_engine_loop():
                         _crypto_running = False
         except Exception as e:
             logger.error(f"crypto_engine_loop: {e}")
-        await asyncio.sleep(30)   # run cycle every 30 seconds
+        await asyncio.sleep(15)   # 15s loop — data fetch takes 8-12s so real cycle ~20s total
 
 
 @asynccontextmanager
@@ -240,13 +259,86 @@ async def lifespan(app: FastAPI):
     init_db()
     if not check_connection():
         logger.warning("⚠️  Database not reachable — running in file-only mode")
+
+    # ── Startup: recover any open crypto positions from Alpaca ────────────────
+    try:
+        from broker.alpaca_client import AlpacaClient
+        import config as _cfg
+        if _cfg.ALPACA_API_KEY:
+            _recovery_broker = AlpacaClient(
+                paper=(_cfg.ALPACA_MODE != "live"),
+                api_key=_cfg.ALPACA_API_KEY,
+                api_secret=_cfg.ALPACA_SECRET_KEY,
+            )
+            positions = _recovery_broker.get_positions()
+            crypto_syms = [p.get("symbol","") for p in positions
+                           if "/" in str(p.get("symbol","")) or
+                           any(c in str(p.get("symbol","")) for c in ["BTC","ETH","SOL","DOGE"])]
+            if crypto_syms:
+                logger.warning(
+                    f"⚠️  Found {len(crypto_syms)} open crypto position(s) from previous session: "
+                    f"{crypto_syms} — they remain open on Alpaca. "
+                    f"Start the crypto engine to resume monitoring them."
+                )
+    except Exception as e:
+        logger.debug(f"Startup position recovery check: {e}")
+
     asyncio.create_task(equity_recorder())
     asyncio.create_task(market_scan_loop())
     asyncio.create_task(daily_summary_sender())
     asyncio.create_task(crypto_engine_loop())
+
     yield
-    logger.info("Shutting down…")
-    await bot_loop.stop()
+
+    # ── Shutdown: clean up everything ─────────────────────────────────────────
+    logger.info("Shutting down — saving state…")
+
+    # Stop stock bot cleanly
+    try:
+        await bot_loop.stop()
+        logger.info("✅ Stock bot stopped cleanly")
+    except Exception as e:
+        logger.error(f"Stock bot stop error: {e}")
+
+    # Stop crypto engine and log open positions
+    global _hybrid_engine, _crypto_running
+    _crypto_running = False
+    if _hybrid_engine is not None:
+        try:
+            crypto_status = _hybrid_engine.get_status()
+            crypto = crypto_status.get("crypto") or {}
+            open_pos = crypto.get("open_position_list", [])
+            if open_pos:
+                logger.warning(
+                    f"⚠️  SHUTDOWN WITH {len(open_pos)} OPEN CRYPTO POSITION(S): "
+                    f"{[p['symbol'] for p in open_pos]} — "
+                    f"These remain open on Alpaca. They will NOT be auto-closed. "
+                    f"Monitor them manually or restart the engine."
+                )
+            else:
+                logger.info("✅ Crypto engine stopped — no open positions")
+        except Exception as e:
+            logger.error(f"Crypto engine shutdown: {e}")
+
+    # Write shutdown log entry to DB
+    try:
+        from database.database import SessionLocal
+        from database.models   import AuditLog
+        db = SessionLocal()
+        db.add(AuditLog(
+            user_id=1,
+            action="SERVER_SHUTDOWN",
+            details=f"Server shutdown at {datetime.now().isoformat()} | "
+                    f"bot_status={bot_loop.status} | "
+                    f"crypto_running={_crypto_running}",
+        ))
+        db.commit()
+        db.close()
+        logger.info("✅ Shutdown logged to DB")
+    except Exception as e:
+        logger.debug(f"Shutdown log: {e}")
+
+    logger.info("Shutdown complete.")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────

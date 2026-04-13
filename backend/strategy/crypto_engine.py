@@ -20,11 +20,60 @@ from typing     import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
-CRYPTO_PAIRS = [
-    "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD",
-    "LINK/USD", "AAVE/USD", "LTC/USD", "BCH/USD",
+# Full crypto universe — 25 liquid coins tracked simultaneously
+CRYPTO_UNIVERSE = [
+    "BTC", "ETH", "SOL", "DOGE", "LINK", "AAVE",
+    "LTC", "BCH", "AVAX", "XRP", "ADA", "DOT",
+    "ATOM", "ALGO", "NEAR", "SAND", "MANA",
+    "CRV", "SUSHI", "BAT", "ZEC", "DASH", "ETC",
+    "SHIB", "FIL",
 ]
-CRYPTO_TICKERS = ["BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH"]
+
+CRYPTO_YF_MAP = {t: f"{t}-USD" for t in CRYPTO_UNIVERSE}
+
+
+def batch_fetch_crypto_bars(tickers: list, interval: str = "1m", period: str = "1d") -> dict:
+    """
+    Fetch bars for ALL tickers in ONE yfinance call to avoid data mixing.
+    Returns {ticker: DataFrame} with correct prices for each symbol.
+    """
+    import yfinance as yf
+    import pandas as pd
+
+    yf_syms = [f"{t}-USD" for t in tickers]
+    result  = {}
+    try:
+        df = yf.download(
+            yf_syms, period=period, interval=interval,
+            progress=False, auto_adjust=True, group_by="ticker",
+        )
+        if df is None or df.empty:
+            return {}
+
+        for ticker in tickers:
+            yf_sym = f"{ticker}-USD"
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    lvl0 = df.columns.get_level_values(0)
+                    if yf_sym in lvl0:
+                        sub = df[yf_sym].copy()
+                    else:
+                        continue
+                else:
+                    sub = df.copy()
+
+                sub.columns = [c.lower() for c in sub.columns]
+                cols = [c for c in ["open","high","low","close","volume"] if c in sub.columns]
+                if len(cols) < 4:
+                    continue
+                sub = sub[cols].dropna()
+                if len(sub) >= 5:
+                    result[ticker] = sub
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f"Batch yfinance download: {e}")
+    return result
 
 
 class EngineState(Enum):
@@ -215,12 +264,6 @@ class CryptoEngine:
 
         return None
 
-        nbp = self.get_non_marginable_buying_power()
-        if nbp < 50:
-            return f"Buying power too low: ${nbp:.2f}"
-
-        return None
-
     # ── Candidate scoring ──────────────────────────────────────────────────────
 
     def score_crypto_candidate(self, symbol: str, bars) -> dict:
@@ -309,7 +352,7 @@ class CryptoEngine:
     def calculate_size(self, candidate: dict) -> dict:
         """
         Work backward from target to find position size.
-        Result is minimum of: target-based, risk-based, buying-power-based.
+        Uses up to 50% of available capital per trade for low-price coins.
         """
         price         = candidate.get("price", 0)
         atr           = candidate.get("atr",   price * 0.005)
@@ -317,51 +360,62 @@ class CryptoEngine:
             return {"qty": 0, "reason": "Invalid price"}
 
         # Refresh buying power (never use stale)
-        nbp           = self.get_non_marginable_buying_power()
-        available     = min(nbp, self.allocated_capital + self.compounded_gains)
+        nbp       = self.get_non_marginable_buying_power()
+        available = min(nbp, self.allocated_capital + self.compounded_gains)
+        if available <= 0:
+            return {"qty": 0, "reason": "No buying power available"}
 
-        # 1. Target-based: units needed to hit next scalp goal
         expected_move = candidate.get("expected_move", atr * 1.5)
         if expected_move <= 0:
             expected_move = price * 0.01
-        target_units  = self.min_scalp_profit / expected_move if expected_move > 0 else 0
 
-        # 2. Risk-based: max loss = max_risk_pct of capital
-        stop_dist     = atr * 1.5
-        max_risk_usd  = self.capital * self.max_risk_pct
-        risk_units    = max_risk_usd / stop_dist if stop_dist > 0 else 0
+        # 1. Target-based: how many units to hit min scalp profit
+        target_units = self.min_scalp_profit / expected_move if expected_move > 0 else 0
 
-        # 3. Buying-power-based: 30% of available per trade
-        bp_units      = (available * 0.30) / price if price > 0 else 0
+        # 2. Risk-based: max loss = 0.5% of total capital
+        stop_dist    = atr * 1.5
+        max_risk_usd = self.capital * self.max_risk_pct
+        risk_units   = max_risk_usd / stop_dist if stop_dist > 0 else 0
 
-        # 4. Min of all constraints
-        qty           = min(target_units, risk_units, bp_units)
-        qty           = max(0.001, round(qty, 6))   # min 0.001 units for crypto
+        # 3. Buying-power-based: use up to 50% of available per trade
+        #    (more aggressive for low-price tokens like ATOM, SUSHI)
+        bp_units = (available * 0.50) / price if price > 0 else 0
 
-        cost          = qty * price
-        exp_profit    = qty * expected_move
-        stop          = round(price - stop_dist, 6)
-        target        = round(price + expected_move, 6)
+        # Take the minimum of all constraints
+        qty  = min(target_units, risk_units, bp_units)
+        qty  = max(0.01, round(qty, 4))
 
-        # Reject if cost exceeds buying power
+        cost       = qty * price
+        exp_profit = qty * expected_move
+        stop       = round(price - stop_dist, 6)
+        target     = round(price + expected_move, 6)
+
+        # Reject if we literally cannot afford it
         if cost > nbp:
             return {"qty": 0, "reason": f"Cost ${cost:.2f} > buying power ${nbp:.2f}"}
 
-        if exp_profit < self.min_scalp_profit * 0.5:
-            return {"qty": 0, "reason": f"Expected profit ${exp_profit:.2f} too low"}
+        # Reject only if profit is truly negligible (< $0.25)
+        if exp_profit < 0.25:
+            return {"qty": 0, "reason": f"Expected profit ${exp_profit:.2f} too low (need $0.25+)"}
+
+        logger.info(
+            f"  Sized {candidate.get('symbol')}: qty={qty:.4f} "
+            f"cost=${cost:.2f} exp_profit=${exp_profit:.2f} "
+            f"stop=${stop:.4f} target=${target:.4f}"
+        )
 
         return {
-            "qty":          qty,
-            "cost":         round(cost, 2),
-            "stop":         stop,
-            "target":       target,
-            "stop_dist":    round(stop_dist, 6),
-            "exp_profit":   round(exp_profit, 2),
-            "reason":       "sized",
+            "qty":        qty,
+            "cost":       round(cost, 2),
+            "stop":       stop,
+            "target":     target,
+            "stop_dist":  round(stop_dist, 6),
+            "exp_profit": round(exp_profit, 2),
+            "reason":     "sized",
             "breakdown": {
-                "target_based": round(target_units, 6),
-                "risk_based":   round(risk_units, 6),
-                "bp_based":     round(bp_units, 6),
+                "target_based": round(target_units, 4),
+                "risk_based":   round(risk_units, 4),
+                "bp_based":     round(bp_units, 4),
                 "final":        qty,
                 "available_bp": round(nbp, 2),
             }
@@ -494,37 +548,42 @@ class CryptoEngine:
         return self.status()
 
     async def _scan_candidates(self) -> List[dict]:
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        t0   = loop.time()
+
+        # ONE batch yfinance call for ALL 25 coins — avoids price mixing between threads
+        bars_map = await loop.run_in_executor(
+            None, batch_fetch_crypto_bars, CRYPTO_UNIVERSE, "1m", "1d"
+        )
+        elapsed = loop.time() - t0
+        logger.info(f"🤖 Batch fetched {len(bars_map)}/{len(CRYPTO_UNIVERSE)} coins in {elapsed:.1f}s")
+
+        # Score each coin and rank by AI
         candidates = []
-        logger.info(f"🔍 Crypto scan starting — checking {len(CRYPTO_TICKERS[:6])} symbols")
-        for ticker in CRYPTO_TICKERS[:6]:
+        for ticker, bars in bars_map.items():
             try:
                 symbol = f"{ticker}/USD"
-                bars = None
-                try:
-                    bars = self.broker.get_crypto_bars(ticker, "1Min", 50)
-                except Exception as e:
-                    logger.warning(f"  get_crypto_bars({ticker}) threw: {e}")
-
-                if bars is None or len(bars) == 0:
-                    logger.warning(f"  {ticker}: no bars returned — skipping")
-                    self._last_error = f"No bar data for {ticker} — API may need different symbol format"
-                    continue
-
-                logger.info(f"  {ticker}: {len(bars)} bars, last close=${bars['close'].iloc[-1]:.4f}")
+                price  = float(bars["close"].iloc[-1])
                 scored = self.score_crypto_candidate(symbol, bars)
                 scored["ticker"] = ticker
-                scored["price"]  = float(bars["close"].iloc[-1])
+                scored["price"]  = price
                 candidates.append(scored)
             except Exception as e:
-                logger.warning(f"  Scan {ticker}: {e}")
-                self._last_error = f"Scan {ticker}: {e}"
+                logger.debug(f"  Score {ticker}: {e}")
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
+
+        # Log top movers
+        for c in candidates[:8]:
+            logger.info(f"  {c['ticker']}: score={c.get('score',0):.0f} valid={c.get('valid')} ${c.get('price',0):.4f}")
+
         if candidates:
             best = candidates[0]
-            logger.info(f"✅ Scan done — best: {best.get('symbol')} score={best.get('score',0):.0f} valid={best.get('valid')}")
+            logger.info(f"✅ Best: {best.get('symbol')} score={best.get('score',0):.0f} valid={best.get('valid')}")
         else:
-            logger.warning("⚠️  Scan returned 0 candidates — check crypto API access")
+            logger.warning("⚠️  0 candidates — batch fetch returned no data")
         return candidates
 
     async def _manage_positions(self):

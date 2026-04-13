@@ -304,7 +304,7 @@ function CryptoLivePanel({ engineStatus }) {
       <div className="bg-brand-500/10 border-b border-brand-500/20 px-4 py-3 flex items-center gap-3">
         <span className="text-lg">{STATE_ICON[state] || '₿'}</span>
         <span className="font-bold text-white text-sm">Crypto Engine — Live View</span>
-        <span className="text-xs text-gray-500">Cycle #{crypto.cycle || 0} · Every 30s</span>
+        <span className="text-xs text-gray-500">Cycle #{crypto.cycle || 0} · ~20s per cycle</span>
         <div className="ml-auto flex items-center gap-3 text-xs">
           <span className="text-gray-500">
             Crypto budget: <span className="text-white font-bold">
@@ -335,7 +335,7 @@ function CryptoLivePanel({ engineStatus }) {
               state === 'locked_profit_mode' ? 'text-green-400' :
               state === 'stopped_for_day' ? 'text-gray-400' :
               state === 'error' ? 'text-red-400' : 'text-white')}>
-              {state === 'idle' && 'Waiting — markets quiet, rescanning every 30s'}
+              {state === 'idle' && 'Waiting — markets quiet, rescanning every ~20s'}
               {state === 'scanning' && '📡 Actively scanning for entry...'}
               {state === 'candidate_ranked' && '🎯 Found a candidate — calculating position size'}
               {state === 'sizing' && '📐 Sizing the position...'}
