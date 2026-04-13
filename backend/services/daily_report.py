@@ -17,12 +17,33 @@ class DailyReporter:
 
     # ── Event logging ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _sanitize(obj):
+        """Recursively convert numpy/pandas types to Python natives for JSON safety."""
+        try:
+            import numpy as np
+            if isinstance(obj, (np.bool_, np.bool8 if hasattr(np, 'bool8') else np.bool_)):
+                return bool(obj)
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+        if isinstance(obj, dict):
+            return {k: DailyReporter._sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [DailyReporter._sanitize(v) for v in obj]
+        return obj
+
     def log(self, event_type: str, symbol: str, msg: str, detail: dict = None):
         self._events.append({
-            "type":      event_type,
-            "symbol":    symbol,
-            "msg":       msg,
-            "detail":    detail or {},
+            "type":      str(event_type),
+            "symbol":    str(symbol),
+            "msg":       str(msg),
+            "detail":    self._sanitize(detail or {}),
             "time":      datetime.now().strftime("%H:%M:%S"),
             "timestamp": datetime.now().isoformat(),
         })

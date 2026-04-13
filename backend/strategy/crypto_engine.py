@@ -20,7 +20,7 @@ from typing     import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
-# Full crypto universe — 25 liquid coins tracked simultaneously
+# Full scan universe — used for momentum discovery (yfinance, not traded)
 CRYPTO_UNIVERSE = [
     "BTC", "ETH", "SOL", "DOGE", "LINK", "AAVE",
     "LTC", "BCH", "AVAX", "XRP", "ADA", "DOT",
@@ -29,7 +29,11 @@ CRYPTO_UNIVERSE = [
     "SHIB", "FIL",
 ]
 
-CRYPTO_YF_MAP = {t: f"{t}-USD" for t in CRYPTO_UNIVERSE}
+# Alpaca paper trading ONLY supports these crypto symbols — do NOT trade others
+ALPACA_TRADEABLE = {
+    "BTC", "ETH", "LTC", "BCH", "DOGE",
+    "LINK", "AAVE", "SOL", "XRP", "SHIB",
+}
 
 
 def batch_fetch_crypto_bars(tickers: list, interval: str = "1m", period: str = "1d") -> dict:
@@ -93,15 +97,64 @@ class EngineState(Enum):
 
 class CryptoPosition:
     def __init__(self, symbol, side, qty, entry, stop, target, order_id=None):
-        self.symbol    = symbol
-        self.side      = side
-        self.qty       = qty
-        self.entry     = entry
-        self.stop      = stop
-        self.target    = target
-        self.order_id  = order_id
-        self.opened_at = datetime.now(timezone.utc)
+        self.symbol        = symbol
+        self.side          = side
+        self.qty           = qty
+        self.entry         = entry
+        self.stop          = stop          # initial stop — gets raised as price climbs
+        self.target        = target        # initial target
+        self.order_id      = order_id
+        self.opened_at     = datetime.now(timezone.utc)
         self.exit_order_id = None
+        self.db_trade_id   = None
+        # Trailing stop tracking
+        self.peak_price    = entry         # highest price seen since entry
+        self.trail_stop    = stop          # current trailing stop — rises with peak
+        self.profit_locked = False         # True once we're in profit-protection mode
+
+    def update_trailing_stop(self, current_price: float) -> bool:
+        """
+        Update trailing stop as price moves up.
+        Returns True if stop was raised (for logging).
+
+        Tiers:
+          - Price up 0.3% from entry  → stop to break-even (entry)
+          - Price up 0.5%             → trail at 60% of gain
+          - Price up 1.0%             → trail at 70% of gain
+          - Price up 2.0%+            → trail at 80% of gain (lock most profit)
+        """
+        if current_price <= self.peak_price:
+            return False  # price not at new high, no update needed
+
+        self.peak_price = current_price
+        gain_pct = (current_price - self.entry) / self.entry * 100
+
+        if gain_pct >= 2.0:
+            # Up 2%+ — lock in 80% of gains
+            new_stop = self.entry + (current_price - self.entry) * 0.80
+            trail_label = "80% trail (2%+ gain)"
+        elif gain_pct >= 1.0:
+            # Up 1% — lock in 70% of gains
+            new_stop = self.entry + (current_price - self.entry) * 0.70
+            trail_label = "70% trail (1%+ gain)"
+        elif gain_pct >= 0.5:
+            # Up 0.5% — lock in 60% of gains
+            new_stop = self.entry + (current_price - self.entry) * 0.60
+            trail_label = "60% trail (0.5%+ gain)"
+        elif gain_pct >= 0.3:
+            # Up 0.3% — at least break even
+            new_stop = self.entry * 1.001  # tiny buffer above entry
+            trail_label = "break-even stop"
+        else:
+            return False  # not enough gain yet to move stop
+
+        # Never move stop down
+        if new_stop > self.trail_stop:
+            self.trail_stop    = round(new_stop, 6)
+            self.stop          = self.trail_stop   # keep stop in sync
+            self.profit_locked = True
+            return True
+        return False
 
     def unrealized_pnl(self, current_price: float) -> float:
         if self.side == "BUY":
@@ -162,6 +215,8 @@ class CryptoEngine:
         self.last_refresh       = 0
         self.trades_today       = 0
         self._scan_results      = []   # last scan scores for UI display
+        self._user_id           = 1    # default — set by caller via engine._user_id = user.id
+        self._reporter          = None # set by caller via engine._reporter = reporter
 
     # ── Account state ─────────────────────────────────────────────────────────
 
@@ -178,15 +233,21 @@ class CryptoEngine:
 
     def get_non_marginable_buying_power(self) -> float:
         """
-        Return the LESSER of Alpaca's actual buying power and
-        the user's configured crypto budget (capital × alloc%).
-        Prevents the engine from using the full $100K Alpaca paper balance.
+        Return available cash for crypto trading.
+        STRICTLY capped at configured crypto budget to never interfere with stock trading.
         """
-        acct  = self.refresh_account()
-        nmbp  = float(acct.get("non_marginable_buying_power") or acct.get("cash", 0))
-        # Cap at user's configured crypto allocation
+        acct   = self.refresh_account()
+        # Use non_marginable_buying_power (settled cash only)
+        nmbp   = float(acct.get("non_marginable_buying_power") or acct.get("cash", 0))
+        # Hard cap at configured crypto budget — NEVER exceed this
         budget = self.capital * self.crypto_alloc
-        return min(nmbp, budget)
+        # Also account for already-open positions
+        open_cost = sum(
+            pos.qty * pos.entry
+            for pos in self.open_positions.values()
+        )
+        available = max(0, min(nmbp, budget) - open_cost)
+        return round(available, 2)
 
     def wait_for_fill(self, order_id: str, timeout: int = 30) -> bool:
         """Poll until order is filled or timeout. Returns True if filled."""
@@ -352,56 +413,67 @@ class CryptoEngine:
     def calculate_size(self, candidate: dict) -> dict:
         """
         Work backward from target to find position size.
-        Uses up to 50% of available capital per trade for low-price coins.
+        Uses actual available cash, not configured budget.
         """
-        price         = candidate.get("price", 0)
-        atr           = candidate.get("atr",   price * 0.005)
+        price = candidate.get("price", 0)
+        atr   = candidate.get("atr", price * 0.005)
         if price <= 0:
             return {"qty": 0, "reason": "Invalid price"}
 
-        # Refresh buying power (never use stale)
+        # Always use LIVE buying power — what's actually free right now
         nbp       = self.get_non_marginable_buying_power()
-        available = min(nbp, self.allocated_capital + self.compounded_gains)
-        if available <= 0:
-            return {"qty": 0, "reason": "No buying power available"}
+        available = nbp  # don't add compounded_gains — cash is cash
+
+        if available < 10:
+            return {"qty": 0, "reason": f"Insufficient cash: ${available:.2f} available"}
 
         expected_move = candidate.get("expected_move", atr * 1.5)
         if expected_move <= 0:
-            expected_move = price * 0.01
+            expected_move = price * 0.005
 
-        # 1. Target-based: how many units to hit min scalp profit
-        target_units = self.min_scalp_profit / expected_move if expected_move > 0 else 0
+        # Stop must be at least 0.1% below entry (Alpaca minimum)
+        min_stop_dist = max(price * 0.001, 0.01)
+        stop_dist     = max(atr * 1.5, min_stop_dist)
+        stop          = round(price - stop_dist, 6)
+        target        = round(price + expected_move, 6)
 
-        # 2. Risk-based: max loss = 0.5% of total capital
-        stop_dist    = atr * 1.5
+        # Ensure stop < price - 0.01 (Alpaca bracket requirement)
+        if price - stop < 0.01:
+            stop = round(price - 0.01, 6)
+
+        # Use up to 40% of available cash per trade
+        max_spend = available * 0.40
+        bp_units  = max_spend / price if price > 0 else 0
+
+        # Risk-based: max 0.5% of configured capital
         max_risk_usd = self.capital * self.max_risk_pct
         risk_units   = max_risk_usd / stop_dist if stop_dist > 0 else 0
 
-        # 3. Buying-power-based: use up to 50% of available per trade
-        #    (more aggressive for low-price tokens like ATOM, SUSHI)
-        bp_units = (available * 0.50) / price if price > 0 else 0
+        # Target-based: units to hit min profit
+        target_units = self.min_scalp_profit / expected_move if expected_move > 0 else 0
 
-        # Take the minimum of all constraints
         qty  = min(target_units, risk_units, bp_units)
         qty  = max(0.01, round(qty, 4))
+        cost = qty * price
 
-        cost       = qty * price
+        # Hard check: can't spend more than available
+        if cost > available:
+            qty  = round((available * 0.95) / price, 4)  # 95% of available
+            cost = qty * price
+
+        if cost > available:
+            return {"qty": 0, "reason": f"Cost ${cost:.2f} > available ${available:.2f}"}
+
         exp_profit = qty * expected_move
-        stop       = round(price - stop_dist, 6)
-        target     = round(price + expected_move, 6)
 
-        # Reject if we literally cannot afford it
-        if cost > nbp:
-            return {"qty": 0, "reason": f"Cost ${cost:.2f} > buying power ${nbp:.2f}"}
-
-        # Reject only if profit is truly negligible (< $0.25)
-        if exp_profit < 0.25:
-            return {"qty": 0, "reason": f"Expected profit ${exp_profit:.2f} too low (need $0.25+)"}
+        if exp_profit < 0.10:
+            return {"qty": 0, "reason": f"Expected profit ${exp_profit:.2f} too low"}
 
         logger.info(
             f"  Sized {candidate.get('symbol')}: qty={qty:.4f} "
             f"cost=${cost:.2f} exp_profit=${exp_profit:.2f} "
-            f"stop=${stop:.4f} target=${target:.4f}"
+            f"stop=${stop:.4f}(-{stop_dist:.4f}) target=${target:.4f} "
+            f"avail=${available:.2f}"
         )
 
         return {
@@ -412,13 +484,6 @@ class CryptoEngine:
             "stop_dist":  round(stop_dist, 6),
             "exp_profit": round(exp_profit, 2),
             "reason":     "sized",
-            "breakdown": {
-                "target_based": round(target_units, 4),
-                "risk_based":   round(risk_units, 4),
-                "bp_based":     round(bp_units, 4),
-                "final":        qty,
-                "available_bp": round(nbp, 2),
-            }
         }
 
     # ── Main cycle ─────────────────────────────────────────────────────────────
@@ -457,7 +522,6 @@ class CryptoEngine:
         # Scan and score
         self.state    = EngineState.SCANNING
         candidates    = await self._scan_candidates()
-        valid         = [c for c in candidates if c.get("valid")]
 
         # Store scan results — convert numpy types to Python native for JSON serialization
         self._scan_results = [
@@ -472,13 +536,51 @@ class CryptoEngine:
             for c in candidates[:8]
         ]
 
-        if not valid:
+        if not candidates:
             self.state = EngineState.IDLE
             return self.status()
 
-        # Best candidate
-        self.state    = EngineState.CANDIDATE_RANKED
-        best          = sorted(valid, key=lambda x: x["score"], reverse=True)[0]
+        # Filter to Alpaca-tradeable coins
+        tradeable = [c for c in candidates if c.get("ticker", "") in ALPACA_TRADEABLE]
+
+        # Filter out already-held symbols
+        already_held = set(sym.split("/")[0] for sym in self.open_positions)
+        tradeable = [c for c in tradeable if c.get("ticker") not in already_held]
+
+        if not tradeable:
+            logger.info(f"All tradeable candidates already held: {already_held} — waiting for exit")
+            self.state = EngineState.POSITION_OPEN
+            return self.status()
+
+        # Valid = meets probability threshold
+        valid_tradeable = [c for c in tradeable if c.get("valid")]
+
+        if not valid_tradeable:
+            # No coin meets strict threshold — pick best tradeable by score
+            # (market may be quiet — don't sit idle forever)
+            best_available = sorted(tradeable, key=lambda x: x["score"], reverse=True)[0]
+            if best_available.get("score", 0) >= 25:
+                logger.info(
+                    f"🎯 No coin meets threshold — trading best available: "
+                    f"{best_available.get('ticker')} score={best_available.get('score',0):.0f} "
+                    f"(quiet market mode)"
+                )
+                valid_tradeable = [best_available]
+            else:
+                # Best tradeable score < 25 — truly no opportunity right now
+                non_tradeable_best = candidates[0] if candidates else None
+                if non_tradeable_best:
+                    logger.info(
+                        f"Market quiet — best is {non_tradeable_best.get('ticker')} "
+                        f"score={non_tradeable_best.get('score',0):.0f} (not tradeable on Alpaca paper)"
+                    )
+                self.state = EngineState.IDLE
+                return self.status()
+
+        # Best tradeable candidate
+        self.state = EngineState.CANDIDATE_RANKED
+        best       = sorted(valid_tradeable, key=lambda x: x["score"], reverse=True)[0]
+        logger.info(f"🎯 Trading {best.get('symbol')} score={best.get('score',0):.0f}")
 
         # Size it
         self.state    = EngineState.SIZING
@@ -488,23 +590,15 @@ class CryptoEngine:
             self.state = EngineState.IDLE
             return self.status()
 
-        # Place order
-        self.state    = EngineState.ORDER_PENDING
-        symbol        = best["symbol"]
-        qty           = sizing["qty"]
-        stop          = sizing["stop"]
-        target        = sizing["target"]
+        # Place order — market only, software-managed stop/target
+        self.state = EngineState.ORDER_PENDING
+        symbol     = best["symbol"]
+        qty        = sizing["qty"]
+        ticker     = symbol.split("/")[0]
 
         try:
-            # Use broker's place_order which handles the correct Alpaca request format
-            ticker = symbol.split("/")[0]  # "BTC/USD" → "BTC"
-            order  = self.broker.place_bracket_order(
-                symbol      = ticker,
-                qty         = qty,
-                side        = "BUY",
-                stop_loss   = sizing["stop"],
-                take_profit = sizing["target"],
-            )
+            # Simple market order — bracket fails due to yfinance/Alpaca price gap
+            order = self.broker.place_market_order(ticker, qty, "BUY")
             if "error" in order:
                 logger.error(f"Crypto order failed: {order['error']}")
                 self._last_error = order["error"]
@@ -512,7 +606,7 @@ class CryptoEngine:
                 return self.status()
 
             order_id = order.get("id", "")
-            logger.info(f"Crypto order placed: {ticker} qty={qty} @ market")
+            logger.info(f"Crypto market order placed: {ticker} qty={qty}")
 
             # Wait for fill
             filled = self.wait_for_fill(order_id, timeout=20)
@@ -521,9 +615,23 @@ class CryptoEngine:
                 self.state = EngineState.IDLE
                 return self.status()
 
+            # Get actual fill price from Alpaca
+            actual_price = best["price"]
+            try:
+                order_obj = self.broker.trading.get_order_by_id(order_id)
+                if order_obj.filled_avg_price:
+                    actual_price = float(order_obj.filled_avg_price)
+            except Exception:
+                pass
+
+            # Stop/target from ACTUAL fill price (not yfinance estimate)
+            stop   = round(actual_price * 0.997, 6)   # 0.3% stop
+            target = round(actual_price * 1.003, 6)   # 0.3% target
+            logger.info(f"Fill: {ticker} @ ${actual_price:.4f} | stop=${stop:.4f} target=${target:.4f}")
+
             # Refresh account after fill
             self.state = EngineState.FUNDS_REFRESHING
-            acct       = self.refresh_account()
+            self.refresh_account()
 
             # Record position
             self.state = EngineState.POSITION_OPEN
@@ -539,6 +647,34 @@ class CryptoEngine:
             self.open_positions[symbol] = pos
             self.trades_today += 1
             logger.info(f"✅ Crypto position: {symbol} qty={qty} entry=${best['price']:.4f} target=${target:.4f} stop=${stop:.4f}")
+
+            # ── Save to database + activity feed ─────────────────────────
+            try:
+                from database.database import SessionLocal
+                from services.trade_service import TradeService
+                from services.daily_report  import DailyReporter
+                db      = SessionLocal()
+                svc     = TradeService(db=db, user_id=self._user_id)
+                db_trade = svc.open_trade(
+                    symbol       = ticker,
+                    side         = "BUY",
+                    qty          = qty,
+                    entry_price  = float(best["price"]),
+                    stop_loss    = float(stop),
+                    take_profit  = float(target),
+                    confidence   = float(best.get("probability", 0)),
+                    signal_reasons = [f"Crypto scalp | score={best.get('score',0):.0f}"],
+                    order_id     = order_id,
+                )
+                pos.db_trade_id = db_trade.id
+                db.close()
+                # Log to activity feed
+                _reporter = getattr(self, '_reporter', None)
+                if _reporter:
+                    _reporter.log_entry(ticker, "BUY", qty, float(best["price"]),
+                                        float(stop), float(target), float(best.get("probability", 0)))
+            except Exception as e:
+                logger.warning(f"Crypto DB save error: {e}")
 
         except Exception as e:
             logger.error(f"CryptoEngine order error: {e}")
@@ -575,23 +711,43 @@ class CryptoEngine:
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
-        # Log top movers
+        # Log top 8 movers (all coins, for visibility)
         for c in candidates[:8]:
-            logger.info(f"  {c['ticker']}: score={c.get('score',0):.0f} valid={c.get('valid')} ${c.get('price',0):.4f}")
+            tradeable = "✓" if c["ticker"] in ALPACA_TRADEABLE else "✗"
+            logger.info(f"  {tradeable} {c['ticker']}: score={c.get('score',0):.0f} valid={c.get('valid')} ${c.get('price',0):.4f}")
 
         if candidates:
             best = candidates[0]
-            logger.info(f"✅ Best: {best.get('symbol')} score={best.get('score',0):.0f} valid={best.get('valid')}")
+            logger.info(f"✅ Best overall: {best.get('symbol')} score={best.get('score',0):.0f}")
+
+            # Log top 3 to activity feed — sanitize all values first
+            _rep = getattr(self, '_reporter', None)
+            if _rep:
+                top3 = candidates[:3]
+                summary = " | ".join(
+                    f"{'✓' if c['ticker'] in ALPACA_TRADEABLE else '✗'}{c['ticker']} "
+                    f"${float(c.get('price',0)):.4f} score={int(c.get('score',0))}"
+                    for c in top3
+                )
+                _rep.log("scan", str(best.get("ticker","CRYPTO")),
+                         f"🤖 Crypto scan: {summary}",
+                         {
+                             "top_coin":       str(best.get("symbol","")),
+                             "score":          int(best.get("score", 0)),
+                             "valid":          bool(best.get("valid", False)),
+                             "coins_scanned":  int(len(candidates)),
+                             "tradeable_valid": int(len([c for c in candidates
+                                                  if c.get("valid") and c["ticker"] in ALPACA_TRADEABLE]))
+                         })
         else:
             logger.warning("⚠️  0 candidates — batch fetch returned no data")
         return candidates
 
     async def _manage_positions(self):
-        """Check exits for all open positions."""
+        """Check exits for all open positions using trailing stops."""
         for sym, pos in list(self.open_positions.items()):
             ticker = sym.split("/")[0]
             try:
-                # Use crypto price method
                 if hasattr(self.broker, "get_latest_crypto_price"):
                     current_price = self.broker.get_latest_crypto_price(ticker)
                 else:
@@ -599,27 +755,60 @@ class CryptoEngine:
                 if current_price <= 0:
                     continue
 
-                upnl    = pos.unrealized_pnl(current_price)
-                held_min= (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 60
+                upnl     = pos.unrealized_pnl(current_price)
+                upnl_pct = (current_price - pos.entry) / pos.entry * 100
+                held_min = (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 60
+
+                # Update trailing stop — raises floor as price climbs
+                stop_raised = pos.update_trailing_stop(current_price)
+                if stop_raised:
+                    locked_pnl = pos.unrealized_pnl(pos.trail_stop)
+                    logger.info(
+                        f"🔒 Trail stop raised: {sym} | "
+                        f"price=${current_price:.4f} peak=${pos.peak_price:.4f} | "
+                        f"new stop=${pos.trail_stop:.4f} | "
+                        f"locked P&L=${locked_pnl:+.2f}"
+                    )
+
                 should_exit = False
                 exit_reason = ""
 
-                # Target hit
-                if current_price >= pos.target:
+                # 1. Trailing stop hit (price dropped from peak)
+                if current_price <= pos.trail_stop and pos.profit_locked:
                     should_exit = True
-                    exit_reason = f"Target hit ${pos.target:.4f}"
+                    exit_reason = (
+                        f"Trailing stop hit ${pos.trail_stop:.4f} | "
+                        f"peak was ${pos.peak_price:.4f} | "
+                        f"P&L ${upnl:+.2f}"
+                    )
 
-                # Stop hit
-                elif current_price <= pos.stop:
+                # 2. Initial stop hit (before profit lock kicks in)
+                elif current_price <= pos.stop and not pos.profit_locked:
                     should_exit = True
-                    exit_reason = f"Stop hit ${pos.stop:.4f}"
+                    exit_reason = f"Stop loss hit ${pos.stop:.4f} | P&L ${upnl:+.2f}"
 
-                # Time stop
+                # 3. Target hit — take profit and look for re-entry
+                elif current_price >= pos.target:
+                    should_exit = True
+                    exit_reason = f"Target hit ${pos.target:.4f} | P&L ${upnl:+.2f} ✅"
+
+                # 4. Time stop — don't hold longer than max_scalp_hold_min
                 elif held_min >= self.max_scalp_hold_min:
                     should_exit = True
-                    exit_reason = f"Time stop ({held_min:.0f}m)"
+                    exit_reason = f"Time stop {held_min:.0f}m | P&L ${upnl:+.2f}"
+
+                else:
+                    # Still in trade — log status every ~5 min
+                    if int(held_min) % 5 == 0 and held_min > 0:
+                        lock_str = f" | 🔒 stop=${pos.trail_stop:.4f}" if pos.profit_locked else ""
+                        logger.info(
+                            f"  📈 {sym}: ${current_price:.4f} | "
+                            f"P&L ${upnl:+.2f} ({upnl_pct:+.2f}%) | "
+                            f"held {held_min:.0f}m{lock_str}"
+                        )
 
                 if should_exit:
+                    logger.info(f"🚪 Exiting {sym}: {exit_reason}")
                     await self._exit_position(sym, pos, current_price, exit_reason)
 
             except Exception as e:
@@ -646,6 +835,43 @@ class CryptoEngine:
             del self.open_positions[sym]
             self.state = EngineState.READY_FOR_REENTRY
             logger.info(f"Exit {sym}: {reason} | P&L ${pnl:+.2f} | Total ${self.realized_pnl:.2f}")
+
+            # ── Save closed trade to DB + activity feed ───────────────────
+            try:
+                from database.database import SessionLocal
+                from services.trade_service import TradeService
+                db = SessionLocal()
+                svc = TradeService(db=db, user_id=self._user_id)
+                trade_id = getattr(pos, "db_trade_id", None)
+                if trade_id:
+                    svc.close_trade(trade_id=trade_id, exit_price=price, reason=reason)
+                else:
+                    # No open trade record — just log a closed one directly
+                    from database.models import Trade
+                    from datetime import date as _date
+                    t = Trade(
+                        user_id     = self._user_id,
+                        symbol      = sym.split("/")[0],
+                        side        = "BUY",
+                        qty         = pos.qty,
+                        entry_price = pos.entry,
+                        exit_price  = price,
+                        pnl         = round(pnl, 2),
+                        net_pnl     = round(pnl, 2),
+                        status      = "closed",
+                        trade_date  = str(_date.today()),
+                        opened_at   = pos.opened_at,
+                        setup_type  = "crypto_scalp",
+                    )
+                    db.add(t)
+                    db.commit()
+                db.close()
+                _reporter = getattr(self, '_reporter', None)
+                if _reporter:
+                    _reporter.log_exit(sym.split("/")[0], "BUY", pos.qty,
+                                       pos.entry, price, pnl, reason)
+            except Exception as e:
+                logger.warning(f"Crypto DB close error: {e}")
 
         except Exception as e:
             logger.error(f"Exit position {sym}: {e}")

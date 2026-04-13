@@ -137,6 +137,7 @@ function TradingApp() {
   )
 
   const pnl         = data?.total_pnl ?? data?.realized_pnl ?? 0
+  const cryptoPnl   = data?.crypto_pnl ?? 0
   const running     = data?.bot_status === 'running'
   const capital     = user?.capital ?? data?.settings?.capital ?? 5000
   const watchlist   = data?.settings?.watchlist ?? []
@@ -160,6 +161,11 @@ function TradingApp() {
         </div>
         <div className={`px-3 py-1 rounded-full text-sm font-bold ${pnl >= 0 ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>
           {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} today
+          {cryptoPnl !== 0 && (
+            <span className="text-xs ml-1 opacity-70">
+              (₿{cryptoPnl >= 0 ? '+' : ''}{cryptoPnl.toFixed(2)})
+            </span>
+          )}
         </div>
         <div className="hidden md:flex items-center gap-1 bg-dark-700 px-3 py-1 rounded-full text-xs text-gray-300">
           💼 ${equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}

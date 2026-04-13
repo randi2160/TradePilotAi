@@ -111,9 +111,29 @@ class StrategyEngine:
         side = signal["signal"]   # "BUY" or "SELL"
 
         # Only LONG positions for retail paper trading
+        # Only LONG positions for retail paper trading
         if side != "BUY":
             logger.debug(f"Skipping {side} signal for {symbol} — only BUY (long) trades enabled")
             return
+
+        # ── Pre-flight buying power check — skip if insufficient cash ─────────
+        try:
+            acct       = self.broker.get_account()
+            nmbp       = float(acct.get("non_marginable_buying_power", 0))
+            dtbp       = float(acct.get("daytrading_buying_power", 0))
+            order_cost = sizing["qty"] * price
+            effective_bp = nmbp if nmbp > 50 else dtbp
+            if effective_bp < order_cost * 1.05:
+                logger.warning(
+                    f"⚠️  Skipping {symbol} — insufficient BP: "
+                    f"need ${order_cost:.0f}, have ${effective_bp:.0f} "
+                    f"(nmbp=${nmbp:.0f} dtbp=${dtbp:.0f})"
+                )
+                return
+        except Exception as e:
+            logger.debug(f"BP pre-check {symbol}: {e}")
+
+        # ── PDT Compliance Check ──────────────────────────────────────────────
 
         # ── PDT Compliance Check ──────────────────────────────────────────────
         pdt_check = self.pdt.check_before_entry(symbol, sizing["qty"], price)

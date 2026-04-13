@@ -49,6 +49,15 @@ class AlpacaClient:
         self.data = StockHistoricalDataClient(
             api_key=key, secret_key=secret,
         )
+        # Crypto data client — for live prices and bars
+        try:
+            from alpaca.data import CryptoHistoricalDataClient
+            self.crypto_data = CryptoHistoricalDataClient(
+                api_key=key, secret_key=secret,
+            )
+        except Exception as e:
+            self.crypto_data = None
+            logger.warning(f"CryptoHistoricalDataClient unavailable: {e}")
         mode = "PAPER" if paper else "LIVE"
         logger.info(f"AlpacaClient ready ({mode}) key=...{key[-4:] if key else 'NONE'}")
 
@@ -60,19 +69,26 @@ class AlpacaClient:
             equity = float(acct.equity)
             dt_count = int(getattr(acct, 'daytrade_count', 0))
             pdt_exempt = equity >= 25_000
+            cash   = float(acct.cash)
+            bp     = float(acct.buying_power)
+            # non_marginable = settled cash not tied to open positions
+            nmbp   = float(getattr(acct, 'non_marginable_buying_power', cash))
+            dtbp   = float(getattr(acct, 'daytrading_buying_power', bp))
             return {
-                "buying_power":         float(acct.buying_power),
-                "equity":               equity,
-                "cash":                 float(acct.cash),
-                "portfolio_value":      float(acct.portfolio_value),
-                "pnl_today":            equity - config.CAPITAL,
-                "daytrade_count":       dt_count,
-                "day_trades_remaining": max(0, 3 - dt_count) if not pdt_exempt else 999,
-                "is_pdt_exempt":        pdt_exempt,
-                "pattern_day_trader":   getattr(acct, 'pattern_day_trader', False),
-                "account_multiplier":   2.0 if equity >= 2_000 else 1.0,
-                "must_hold_overnight":  not pdt_exempt and dt_count >= 3,
-                "pdt_warning":          not pdt_exempt and dt_count >= 2,
+                "buying_power":                 bp,
+                "non_marginable_buying_power":   nmbp,
+                "daytrading_buying_power":       dtbp,
+                "equity":                        equity,
+                "cash":                          cash,
+                "portfolio_value":               float(acct.portfolio_value),
+                "pnl_today":                     equity - config.CAPITAL,
+                "daytrade_count":                dt_count,
+                "day_trades_remaining":          max(0, 3 - dt_count) if not pdt_exempt else 999,
+                "is_pdt_exempt":                 pdt_exempt,
+                "pattern_day_trader":            getattr(acct, 'pattern_day_trader', False),
+                "account_multiplier":            2.0 if equity >= 2_000 else 1.0,
+                "must_hold_overnight":           not pdt_exempt and dt_count >= 3,
+                "pdt_warning":                   not pdt_exempt and dt_count >= 2,
             }
         except Exception as e:
             logger.error(f"get_account error: {e}")
@@ -192,17 +208,43 @@ class AlpacaClient:
         return pd.DataFrame()
 
     def get_latest_crypto_price(self, symbol: str) -> float:
-        """Get latest crypto price via yfinance."""
+        """Get live crypto price from Alpaca crypto data API (real-time, not yfinance)."""
+        base       = symbol.upper().replace("USD","").replace("/","").strip()
+        alpaca_sym = f"{base}/USD"
+
+        # Primary: Alpaca live crypto quote
+        if self.crypto_data:
+            try:
+                from alpaca.data.requests import CryptoLatestQuoteRequest
+                req   = CryptoLatestQuoteRequest(symbol_or_symbols=alpaca_sym)
+                resp  = self.crypto_data.get_crypto_latest_quote(req)
+                quote = resp.get(alpaca_sym)
+                if quote:
+                    bid = float(getattr(quote, "bid_price", 0) or 0)
+                    ask = float(getattr(quote, "ask_price", 0) or 0)
+                    if bid > 0 and ask > 0:
+                        return round((bid + ask) / 2, 6)
+                    if ask > 0: return round(ask, 6)
+                    if bid > 0: return round(bid, 6)
+            except Exception as e:
+                logger.debug(f"Alpaca crypto quote {symbol}: {e}")
+
+            # Fallback: Alpaca crypto bar (last 1-min close)
+            try:
+                from alpaca.data.requests import CryptoBarsRequest
+                from alpaca.data.timeframe import TimeFrame
+                req      = CryptoBarsRequest(symbol_or_symbols=alpaca_sym, timeframe=TimeFrame.Minute, limit=1)
+                bars     = self.crypto_data.get_crypto_bars(req)
+                bar_list = bars.get(alpaca_sym)
+                if bar_list:
+                    return float(bar_list[-1].close)
+            except Exception as e:
+                logger.debug(f"Alpaca crypto bar {symbol}: {e}")
+
+        # Last resort: yfinance
         try:
             import yfinance as yf
-            ticker_map = {
-                "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
-                "DOGE": "DOGE-USD", "LINK": "LINK-USD", "AAVE": "AAVE-USD",
-                "LTC": "LTC-USD",  "BCH": "BCH-USD",
-            }
-            base   = symbol.upper().split("/")[0]
-            yf_sym = ticker_map.get(base, base + "-USD")
-            df     = yf.download(yf_sym, period="1d", interval="1m", progress=False, auto_adjust=True)
+            df = yf.download(f"{base}-USD", period="1d", interval="1m", progress=False, auto_adjust=True)
             if df is not None and not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
                     df = df.droplevel(1, axis=1)
@@ -210,7 +252,7 @@ class AlpacaClient:
                 if "close" in df.columns:
                     return float(df["close"].iloc[-1])
         except Exception as e:
-            logger.debug(f"get_latest_crypto_price({symbol}): {e}")
+            logger.debug(f"yfinance fallback {symbol}: {e}")
         return 0.0
 
     def get_latest_price(self, symbol: str) -> float:
@@ -289,6 +331,56 @@ class AlpacaClient:
             return self.place_market_order(sym, qty, side)
 
     def close_position(self, symbol: str) -> dict:
+        """Close an entire position by symbol (market order)."""
+        try:
+            sym = self._crypto_symbol(symbol) if "/" not in symbol and len(symbol) <= 5 else symbol
+            result = self.trading.close_position(sym)
+            logger.info(f"Closed position: {symbol}")
+            return {"status": "closed", "symbol": symbol, "id": str(getattr(result, "id", ""))}
+        except Exception as e:
+            logger.error(f"close_position({symbol}): {e}")
+            # Try alternate symbol format
+            try:
+                alt = symbol.replace("/", "").replace("-", "") + "USD"
+                result = self.trading.close_position(alt)
+                logger.info(f"Closed position (alt): {alt}")
+                return {"status": "closed", "symbol": alt}
+            except Exception as e2:
+                logger.error(f"close_position alt ({symbol}): {e2}")
+                return {"error": str(e2)}
+        """Cancel all open orders. Returns list of cancelled order IDs."""
+        try:
+            result = self.trading.cancel_orders()
+            cancelled = [str(r.get("id", "")) for r in result if isinstance(r, dict)]
+            logger.info(f"Cancelled {len(cancelled)} open orders")
+            return cancelled
+        except Exception as e:
+            logger.error(f"cancel_all_orders: {e}")
+            return []
+
+    def get_open_orders(self) -> list:
+        """Get all open orders."""
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums   import QueryOrderStatus
+            req    = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            orders = self.trading.get_orders(filter=req)
+            return [
+                {
+                    "id":          str(o.id),
+                    "symbol":      str(o.symbol),
+                    "side":        str(o.side),
+                    "qty":         float(o.qty or 0),
+                    "filled_qty":  float(o.filled_qty or 0),
+                    "status":      str(o.status),
+                    "order_type":  str(o.order_type),
+                    "created_at":  str(o.created_at),
+                }
+                for o in orders
+            ]
+        except Exception as e:
+            logger.error(f"get_open_orders: {e}")
+            return []
         try:
             sym = self._crypto_symbol(symbol) if self._is_crypto(symbol) else symbol.upper()
             self.trading.close_position(sym)

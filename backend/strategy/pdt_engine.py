@@ -98,14 +98,42 @@ class PDTComplianceEngine:
             return self._cached
 
         try:
-            acct = self.broker.trading.get_account()
+            acct   = self.broker.trading.get_account()
+            equity = float(acct.equity)
+            dtbp   = float(getattr(acct, 'daytrading_buying_power', 0) or 0)
+            nmbp   = float(getattr(acct, 'non_marginable_buying_power', 0) or 0)
+            cash   = float(acct.cash)
+            raw_bp = float(acct.buying_power)
+
+            # Pick the best available BP for stocks:
+            # 1. Use daytrading_buying_power if > $100
+            # 2. Else use non_marginable (settled cash not tied to crypto)
+            # 3. Never use full buying_power (includes crypto margin which isn't real)
+            if dtbp > 100:
+                effective_bp = dtbp
+            elif nmbp > 100:
+                effective_bp = nmbp
+            else:
+                effective_bp = cash  # last resort
+
+            # Cap at configured capital to stay within risk limits
+            try:
+                import config
+                effective_bp = min(effective_bp, float(config.CAPITAL))
+            except Exception:
+                pass
+
+            logger.info(
+                f"PDT BP: dtbp=${dtbp:.0f} nmbp=${nmbp:.0f} "
+                f"cash=${cash:.0f} → using ${effective_bp:.0f}"
+            )
 
             status = PDTStatus(
-                equity            = float(acct.equity),
+                equity            = equity,
                 daytrade_count    = int(getattr(acct, 'daytrade_count', 0)),
-                buying_power      = float(acct.buying_power),
+                buying_power      = effective_bp,
                 pattern_day_trader= getattr(acct, 'pattern_day_trader', False),
-                cash              = float(acct.cash),
+                cash              = cash,
             )
             self._cached   = status
             self._cache_ts = now

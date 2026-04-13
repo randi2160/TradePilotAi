@@ -440,10 +440,10 @@ export default function DailyAdvisor() {
         </div>
       )}
 
-      {/* AI Recommendations */}
+      {/* AI Recommendations — Stocks + Crypto side by side */}
       <div className="space-y-3">
         <div className="flex items-center gap-2">
-          <div className="text-sm font-bold text-white">🤖 AI Picks</div>
+          <div className="text-sm font-bold text-white">🤖 AI Picks — Live Market Scan</div>
           {pendingCount > 0 && (
             <span className="text-xs px-2 py-0.5 bg-yellow-900/30 text-yellow-400 border border-yellow-800/40 rounded-full font-bold">
               {pendingCount} need review
@@ -456,12 +456,43 @@ export default function DailyAdvisor() {
         {scanning && (
           <div className="flex items-center justify-center gap-2 py-6 text-sm text-gray-500">
             <RefreshCw size={14} className="animate-spin text-brand-500"/>
-            Scanning market — analyzing movers, news, PDT budget…
+            Scanning top movers + 25 crypto pairs — ranking by momentum…
           </div>
         )}
-        {recs.map(rec => <RecCard key={rec.id} rec={rec} onReview={loadAll}/>)}
+        {recs.length > 0 && (() => {
+          const stockRecs  = recs.filter(r => r.asset_type !== 'crypto')
+          const cryptoRecs = recs.filter(r => r.asset_type === 'crypto')
+          return (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Stocks column */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 pb-1 border-b border-dark-600">
+                  <span className="text-xs font-bold text-blue-400">📈 STOCKS</span>
+                  <span className="text-xs text-gray-600">top movers by momentum</span>
+                </div>
+                {stockRecs.length === 0 ? (
+                  <div className="text-center py-4 text-xs text-gray-600">No stock picks above threshold</div>
+                ) : (
+                  stockRecs.map(rec => <RecCard key={rec.id} rec={rec} onReview={loadAll}/>)
+                )}
+              </div>
+              {/* Crypto column */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 pb-1 border-b border-dark-600">
+                  <span className="text-xs font-bold text-yellow-400">₿ CRYPTO</span>
+                  <span className="text-xs text-gray-600">25 coins ranked by momentum</span>
+                </div>
+                {cryptoRecs.length === 0 ? (
+                  <div className="text-center py-4 text-xs text-gray-600">No crypto picks above threshold</div>
+                ) : (
+                  cryptoRecs.map(rec => <RecCard key={rec.id} rec={rec} onReview={loadAll}/>)
+                )}
+              </div>
+            </div>
+          )
+        })()}
         {recs.length > 0 && (
-          <p className="text-xs text-gray-600 text-center">Accept to enable auto-trading · All decisions are logged</p>
+          <p className="text-xs text-gray-600 text-center">Ranked by momentum score · Accept to enable auto-trading</p>
         )}
       </div>
 

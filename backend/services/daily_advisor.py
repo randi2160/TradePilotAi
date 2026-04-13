@@ -165,29 +165,108 @@ def optimize_portfolio(
 # ── AI Analysis helper ─────────────────────────────────────────────────────────
 
 async def _analyze_symbol(symbol: str, db: Session, user: User) -> dict:
-    """Run AI sentiment analysis for a symbol, using cache."""
+    """Run AI/technical analysis for a symbol, using cache if available."""
     try:
         from services.ai_cache import AIAnalysisCache, get_refresh_interval
         is_admin = getattr(user, "is_admin", False)
         tier     = "admin" if is_admin else (getattr(user, "subscription_tier", "free") or "free")
         cache    = AIAnalysisCache(db)
         cached   = cache.get_cached(symbol, "sentiment", tier, is_admin=is_admin)
-        if cached:
+        if cached and cached.get("signal") in ("BUY","SELL"):
             cached["symbol"] = symbol
             return cached
     except Exception:
         pass
 
-    # No cache — do a lightweight fallback (full analysis called from /api/ai/symbol-sentiment)
-    return {
-        "symbol":     symbol,
-        "signal":     "HOLD",
-        "confidence": 50,
-        "score":      50,
-        "reasoning":  f"Run AI analysis on ${symbol} to get full entry/exit guidance.",
-        "entry":      None, "exit": None, "stop": None, "risk_reward": None,
-        "_needs_analysis": True,
-    }
+    # Technical analysis fallback — momentum + volume scoring
+    try:
+        import pandas as pd
+        import numpy as np
+        from scheduler.bot_loop import bot_loop
+        broker = bot_loop.broker
+        if not broker:
+            raise Exception("No broker")
+
+        bars = broker.get_bars(symbol, "5Min", 60)
+        if bars is None or len(bars) < 20:
+            raise Exception("No bars")
+
+        closes  = bars["close"].values.astype(float)
+        volumes = bars["volume"].values.astype(float)
+
+        # Momentum
+        momentum_5  = (closes[-1] - closes[-5])  / closes[-5]  * 100
+        momentum_20 = (closes[-1] - closes[-20]) / closes[-20] * 100
+
+        # Volume
+        avg_vol   = np.mean(volumes[-20:])
+        vol_spike = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
+
+        # EMA trend
+        def ema(arr, n):
+            k = 2 / (n + 1); e = arr[0]
+            for v in arr[1:]: e = v * k + e * (1 - k)
+            return e
+
+        ema8  = ema(closes[-30:], 8)
+        ema21 = ema(closes[-30:], 21)
+        trend_up = ema8 > ema21
+
+        # ATR
+        atr = float(np.mean(np.abs(np.diff(closes[-14:]))))
+        price = float(closes[-1])
+
+        # Signal
+        bullish_score = 0
+        if momentum_5  > 0.2:  bullish_score += 2
+        if momentum_20 > 0.5:  bullish_score += 2
+        if trend_up:            bullish_score += 2
+        if vol_spike   > 1.5:   bullish_score += 2
+        if momentum_5  < -0.2:  bullish_score -= 3
+        if momentum_20 < -0.5:  bullish_score -= 3
+        if not trend_up:        bullish_score -= 1
+
+        if bullish_score >= 4:
+            signal = "BUY"
+            confidence = min(85, 60 + bullish_score * 3)
+        elif bullish_score <= -3:
+            signal = "SELL"
+            confidence = min(80, 60 + abs(bullish_score) * 3)
+        else:
+            signal = "HOLD"
+            confidence = 45
+
+        entry  = round(price, 2)
+        target = round(price * (1 + atr/price * 2), 2) if signal == "BUY" else round(price * (1 - atr/price * 2), 2)
+        stop   = round(price * (1 - atr/price * 1.5), 2) if signal == "BUY" else round(price * (1 + atr/price * 1.5), 2)
+        rr     = round(abs(target - entry) / abs(stop - entry), 2) if abs(stop - entry) > 0 else 1.0
+
+        reasons = []
+        if momentum_5  > 0: reasons.append(f"+{momentum_5:.2f}% 5-bar momentum")
+        if momentum_20 > 0: reasons.append(f"+{momentum_20:.2f}% session momentum")
+        if trend_up:        reasons.append("EMA8 > EMA21 uptrend")
+        if vol_spike > 1.5: reasons.append(f"{vol_spike:.1f}x volume spike")
+
+        return {
+            "symbol":     symbol,
+            "signal":     signal,
+            "confidence": int(confidence),
+            "score":      int(confidence),
+            "entry":      entry,
+            "exit":       target,
+            "exit_target":target,
+            "stop":       stop,
+            "risk_reward":rr,
+            "reasoning":  f"Technical: {', '.join(reasons) or 'neutral momentum'}. "
+                          f"5m mom={momentum_5:+.2f}% 20-bar={momentum_20:+.2f}% vol={vol_spike:.1f}x",
+        }
+    except Exception as e:
+        logger.debug(f"Technical analysis {symbol}: {e}")
+        return {
+            "symbol": symbol, "signal": "HOLD", "confidence": 45, "score": 45,
+            "reasoning": "Unable to analyze — no market data available",
+            "entry": None, "exit": None, "stop": None, "risk_reward": None,
+        }
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -348,6 +427,7 @@ async def get_recommendations(
             "risk_reward":   r.risk_reward,
             "suggested_qty": r.suggested_qty, "suggested_alloc": r.suggested_alloc,
             "reasoning":     r.reasoning, "source": r.source, "status": r.status,
+            "asset_type":    "crypto" if "crypto" in (r.source or "") or "/" in (r.symbol or "") else "stock",
             "eligible_for_auto": r.eligible_for_auto,
             "reviewed_at":   r.reviewed_at.isoformat() if r.reviewed_at else None,
             "accepted_at":   r.accepted_at.isoformat() if r.accepted_at else None,
@@ -411,90 +491,367 @@ async def run_daily_scan(
     db:   Session = Depends(get_db),
 ):
     """
-    Full daily scan: scan market → analyze top movers → optimize portfolio
-    → store as ranked AI recommendations.
-    Admin can force a fresh scan anytime.
+    Full daily scan:
+    - Stocks: scan market for top 10 movers (gainers + volume)
+    - Crypto: scan top 25 coins for momentum
+    - Score all by momentum, volatility, volume
+    - Rank and save top picks as AI recommendations
+    No hardcoded watchlist — pure momentum discovery.
     """
     from database.models import AIRecommendation
+    import asyncio
 
-    # Get account state
-    account = _get_account_info(user, db)
-    goal    = _get_daily_goal(user)
-    min_conf= int(_get_setting(db, "alert_confidence_min", 65))
+    account  = _get_account_info(user, db)
+    goal     = _get_daily_goal(user)
+    min_conf = 50  # minimum confidence to show
 
-    # Get top movers from scanner
-    candidates = []
+    # ── Step 1: Dynamic stock candidates from live market scan ────────────────
+    stock_candidates = []
     try:
         from scheduler.bot_loop import bot_loop
-        if bot_loop.broker:
+        broker = bot_loop.broker
+        if broker:
             from data.market_scanner import MarketScanner
-            scanner = MarketScanner(bot_loop.broker)
+            scanner = MarketScanner(broker)
             gainers = scanner.get_top_gainers(limit=10)
             actives = scanner.get_most_active(limit=10)
-            seen    = set()
+            seen = set()
             for sym in gainers + actives:
                 s = sym if isinstance(sym, str) else sym.get("symbol", "")
                 if s and s not in seen:
-                    candidates.append(s)
+                    stock_candidates.append(s)
                     seen.add(s)
     except Exception as e:
-        logger.warning(f"Scanner error: {e}")
+        logger.warning(f"Stock scanner error: {e}")
 
-    # Include user's daily picks in analysis
-    from database.models import DailyUserPick
-    user_picks = [p.symbol for p in db.query(DailyUserPick).filter_by(user_id=user.id, trade_date=today()).all()]
-    for sym in user_picks:
-        if sym not in candidates:
-            candidates.append(sym)
+    # Fallback if broker not running
+    if not stock_candidates:
+        stock_candidates = ["SPY","QQQ","AAPL","TSLA","NVDA","AMD","META","AMZN","COIN","MSTR"]
 
-    # Fallback watchlist
-    if not candidates:
+    # ── Step 2: Dynamic crypto scan via yfinance (all 25 coins) ──────────────
+    CRYPTO_UNIVERSE = [
+        "BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH",
+        "AVAX","XRP","ADA","DOT","ATOM","ALGO","NEAR","SAND",
+        "MANA","CRV","SUSHI","BAT","ZEC","DASH","ETC","SHIB","FIL",
+    ]
+
+    def _score_crypto_momentum(ticker: str) -> dict:
         try:
-            from data.settings_manager import SettingsManager
-            sm  = SettingsManager()
-            candidates = sm.get_watchlist()[:10]
-        except Exception:
-            candidates = ["SPY","QQQ","AAPL","TSLA","NVDA","AMD","META","AMZN"]
+            import yfinance as yf
+            import numpy as np
+            import pandas as pd
+            df = yf.download(f"{ticker}-USD", period="1d", interval="5m",
+                             progress=False, auto_adjust=True)
+            if df is None or df.empty or len(df) < 10:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df.droplevel(1, axis=1)
+            df.columns = [c.lower() for c in df.columns]
+            if "close" not in df.columns:
+                return None
+            closes  = df["close"].dropna().values.astype(float)
+            volumes = df["volume"].dropna().values.astype(float) if "volume" in df.columns else None
 
-    # Analyze each candidate
-    analyses = []
-    for sym in candidates[:15]:
-        try:
-            result = await _analyze_symbol(sym, db, user)
-            result["symbol"] = sym
-            if result.get("confidence", 0) >= min_conf and result.get("signal") in ("BUY","SELL"):
-                analyses.append(result)
+            price = float(closes[-1])
+            n5    = min(12, len(closes) - 1)
+            n20   = min(48, len(closes) - 1)
+            mom5  = (closes[-1] - closes[-n5])  / closes[-n5]  * 100 if closes[-n5] > 0 else 0
+            mom20 = (closes[-1] - closes[-n20]) / closes[-n20] * 100 if closes[-n20] > 0 else 0
+            vol_spike = 1.0
+            if volumes is not None and len(volumes) >= 20:
+                avg = np.mean(volumes[-20:])
+                vol_spike = min(5.0, float(volumes[-1]) / avg) if avg > 0 else 1.0
+            atr  = float(np.mean(np.abs(np.diff(closes[-14:])))) if len(closes) >= 15 else price * 0.005
+            score = abs(mom5) * 2 + abs(mom20) + vol_spike * 2
+
+            # Signal
+            bullish = 0
+            if mom5  > 0.3:  bullish += 2
+            if mom20 > 0.5:  bullish += 2
+            if vol_spike > 1.5: bullish += 1
+            if mom5  < -0.3: bullish -= 3
+            if mom20 < -0.5: bullish -= 3
+
+            if bullish >= 3:
+                signal = "BUY"
+                confidence = min(85, 55 + bullish * 5)
+            elif bullish <= -3:
+                signal = "SELL"
+                confidence = min(80, 55 + abs(bullish) * 5)
+            else:
+                signal = "HOLD"
+                confidence = 40
+
+            entry  = round(price, 6)
+            target = round(price * (1 + atr / price * 3), 6)
+            stop   = round(price * (1 - atr / price * 2), 6)
+            rr     = round((target - entry) / (entry - stop), 2) if entry > stop else 1.0
+
+            return {
+                "symbol":     f"{ticker}/USD",
+                "ticker":     ticker,
+                "asset_type": "crypto",
+                "signal":     signal,
+                "confidence": int(confidence),
+                "score":      round(score, 2),
+                "momentum":   round(mom5, 2),
+                "vol_spike":  round(vol_spike, 2),
+                "price":      price,
+                "entry":      entry,
+                "exit_target": target,
+                "stop":       stop,
+                "risk_reward": rr,
+                "reasoning":  (
+                    f"Crypto momentum: {mom5:+.2f}% (5m) {mom20:+.2f}% (session) | "
+                    f"Vol spike {vol_spike:.1f}x | Score {score:.1f}"
+                ),
+            }
         except Exception as e:
-            logger.warning(f"Analysis failed for {sym}: {e}")
+            logger.debug(f"Crypto score {ticker}: {e}")
+            return None
 
-    # Optimize portfolio
-    optimized = optimize_portfolio(candidates[:15], analyses, account, goal, user)
+    # ── Step 2b: Crypto — ONE batch yfinance call for all 25 coins (no price mixing) ──
+    loop = asyncio.get_event_loop()
 
-    # Save recommendations
+    def _batch_score_all_crypto() -> list:
+        import yfinance as yf
+        import numpy as np
+        import pandas as pd
+
+        yf_syms = [f"{t}-USD" for t in CRYPTO_UNIVERSE]
+        results = []
+        try:
+            df = yf.download(yf_syms, period="1d", interval="5m",
+                             progress=False, auto_adjust=True, group_by="ticker")
+            if df is None or df.empty:
+                return []
+        except Exception as e:
+            logger.warning(f"Crypto batch download: {e}")
+            return []
+
+        for ticker in CRYPTO_UNIVERSE:
+            yf_sym = f"{ticker}-USD"
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    lvl0 = df.columns.get_level_values(0)
+                    if yf_sym not in lvl0:
+                        continue
+                    sub = df[yf_sym].copy()
+                else:
+                    sub = df.copy()
+
+                sub.columns = [c.lower() for c in sub.columns]
+                if "close" not in sub.columns:
+                    continue
+                closes  = sub["close"].dropna().values.astype(float)
+                volumes = sub["volume"].dropna().values.astype(float) if "volume" in sub.columns else None
+
+                if len(closes) < 10:
+                    continue
+
+                price = float(closes[-1])
+                n5    = min(12, len(closes) - 1)
+                n20   = min(48, len(closes) - 1)
+                mom5  = (closes[-1] - closes[-n5])  / closes[-n5]  * 100 if closes[-n5] > 0 else 0
+                mom20 = (closes[-1] - closes[-n20]) / closes[-n20] * 100 if closes[-n20] > 0 else 0
+
+                vol_spike = 1.0
+                if volumes is not None and len(volumes) >= 20:
+                    avg = float(np.mean(volumes[-20:]))
+                    vol_spike = min(5.0, float(volumes[-1]) / avg) if avg > 0 else 1.0
+
+                atr = float(np.mean(np.abs(np.diff(closes[-14:])))) if len(closes) >= 15 else price * 0.005
+
+                # Directional score — positive = bullish, negative = bearish
+                score = mom5 * 2 + mom20 * 1.5 + (vol_spike - 1) * 2
+                abs_score = abs(mom5) * 2 + abs(mom20) + vol_spike * 2
+
+                # Signal thresholds — realistic for quiet overnight market
+                if score >= 0.3 and mom5 >= 0:
+                    signal = "BUY"
+                    confidence = min(85, 55 + int(score * 8))
+                elif score <= -0.3 and mom5 < 0:
+                    signal = "SELL"
+                    confidence = min(80, 55 + int(abs(score) * 8))
+                else:
+                    signal = "HOLD"
+                    confidence = 40
+
+                entry  = round(price, 6)
+                target = round(price * (1 + atr / price * 3), 6) if signal == "BUY" else round(price * (1 - atr / price * 3), 6)
+                stop   = round(price * (1 - atr / price * 2), 6) if signal == "BUY" else round(price * (1 + atr / price * 2), 6)
+                rr     = round(abs(target - entry) / abs(entry - stop), 2) if abs(entry - stop) > 0 else 1.0
+
+                results.append({
+                    "symbol":     f"{ticker}/USD",
+                    "ticker":     ticker,
+                    "asset_type": "crypto",
+                    "signal":     signal,
+                    "confidence": int(confidence),
+                    "score":      round(abs_score, 2),
+                    "momentum":   round(mom5, 3),
+                    "vol_spike":  round(vol_spike, 2),
+                    "price":      round(price, 6),
+                    "entry":      entry,
+                    "exit_target": target,
+                    "stop":       stop,
+                    "risk_reward": rr,
+                    "reasoning":  (
+                        f"{ticker} | 5m: {mom5:+.2f}% | session: {mom20:+.2f}% | "
+                        f"vol {vol_spike:.1f}x | price ${price:.4f}"
+                    ),
+                })
+            except Exception as e:
+                logger.debug(f"Crypto score {ticker}: {e}")
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results
+
+    all_crypto = await loop.run_in_executor(None, _batch_score_all_crypto)
+    crypto_picks = [r for r in all_crypto if r.get("signal") in ("BUY","SELL") and r.get("confidence",0) >= min_conf][:5]
+
+    # If nothing clears threshold (very quiet market), show top 3 by score regardless
+    if not crypto_picks and all_crypto:
+        crypto_picks = sorted(all_crypto, key=lambda x: x["score"], reverse=True)[:3]
+        for c in crypto_picks:
+            c["confidence"] = max(c["confidence"], min_conf)
+
+    logger.info(f"Crypto scan: {len(crypto_picks)} picks | top={all_crypto[0]['ticker'] if all_crypto else 'none'}")
+
+    # ── Step 3: Stock analysis via yfinance (works 24/7, no broker needed) ───
+    def _score_stock_momentum(sym: str) -> dict:
+        import yfinance as yf
+        import numpy as np
+        try:
+            df = yf.download(sym, period="5d", interval="5m", progress=False, auto_adjust=True)
+            if df is None or df.empty or len(df) < 20:
+                return None
+            if hasattr(df.columns, "droplevel"):
+                try: df = df.droplevel(1, axis=1)
+                except Exception: pass
+            df.columns = [c.lower() for c in df.columns]
+            if "close" not in df.columns:
+                return None
+            closes  = df["close"].dropna().values.astype(float)
+            volumes = df["volume"].dropna().values.astype(float) if "volume" in df.columns else None
+
+            price = float(closes[-1])
+            n5    = min(12, len(closes) - 1)
+            n20   = min(48, len(closes) - 1)
+            mom5  = (closes[-1] - closes[-n5])  / closes[-n5]  * 100 if closes[-n5] > 0 else 0
+            mom20 = (closes[-1] - closes[-n20]) / closes[-n20] * 100 if closes[-n20] > 0 else 0
+
+            vol_spike = 1.0
+            if volumes is not None and len(volumes) >= 20:
+                avg = float(np.mean(volumes[-20:]))
+                vol_spike = min(5.0, float(volumes[-1]) / avg) if avg > 0 else 1.0
+
+            def ema(arr, n):
+                k = 2/(n+1); e = float(arr[0])
+                for v in arr[1:]: e = float(v)*k + e*(1-k)
+                return e
+
+            ema8  = ema(closes[-30:], 8) if len(closes) >= 30 else closes[-1]
+            ema21 = ema(closes[-30:], 21) if len(closes) >= 30 else closes[-1]
+            trend_up = ema8 > ema21
+
+            atr = float(np.mean(np.abs(np.diff(closes[-14:])))) if len(closes) >= 15 else price * 0.01
+
+            # Score
+            bullish = 0
+            if mom5  > 0.3:   bullish += 2
+            if mom20 > 0.5:   bullish += 2
+            if trend_up:       bullish += 2
+            if vol_spike > 1.5: bullish += 2
+            if mom5  < -0.3:  bullish -= 3
+            if mom20 < -0.5:  bullish -= 3
+            if not trend_up:   bullish -= 1
+
+            if bullish >= 3:
+                signal = "BUY"
+                confidence = min(88, 58 + bullish * 4)
+            elif bullish <= -3:
+                signal = "SELL"
+                confidence = min(82, 58 + abs(bullish) * 4)
+            else:
+                signal = "HOLD"
+                confidence = 40
+
+            entry  = round(price, 2)
+            target = round(price + atr * 3, 2) if signal == "BUY" else round(price - atr * 3, 2)
+            stop   = round(price - atr * 2, 2) if signal == "BUY" else round(price + atr * 2, 2)
+            rr     = round(abs(target - entry) / abs(entry - stop), 2) if abs(entry - stop) > 0 else 1.0
+
+            reasons = []
+            if mom5  > 0: reasons.append(f"{mom5:+.2f}% 5-bar")
+            if mom20 > 0: reasons.append(f"{mom20:+.2f}% session")
+            if trend_up:  reasons.append("uptrend")
+            if vol_spike > 1.5: reasons.append(f"{vol_spike:.1f}x vol")
+
+            return {
+                "symbol": sym, "ticker": sym, "asset_type": "stock",
+                "signal": signal, "confidence": int(confidence),
+                "score":  round(abs(mom5) * 2 + abs(mom20) + vol_spike, 2),
+                "entry": entry, "exit_target": target, "stop": stop,
+                "risk_reward": rr,
+                "reasoning": f"{sym}: {', '.join(reasons) or 'neutral'} | ${price:.2f}",
+            }
+        except Exception as e:
+            logger.debug(f"Stock score {sym}: {e}")
+            return None
+
+    stock_tasks   = [loop.run_in_executor(None, _score_stock_momentum, s) for s in stock_candidates[:12]]
+    stock_results = await asyncio.gather(*stock_tasks)
+    stock_analyses = [r for r in stock_results if r and r.get("signal") in ("BUY","SELL") and r.get("confidence",0) >= min_conf]
+    stock_picks = sorted(stock_analyses, key=lambda x: x.get("score",0), reverse=True)[:5]
+
+    # Fallback: top 3 by score if nothing clears threshold
+    if not stock_picks:
+        all_stocks = [r for r in stock_results if r]
+        stock_picks = sorted(all_stocks, key=lambda x: x.get("score",0), reverse=True)[:3]
+        for s in stock_picks:
+            s["confidence"] = max(s.get("confidence",0), min_conf)
+
+    logger.info(f"Stock scan: {len(stock_picks)} picks from {len(stock_candidates)} candidates")
+
+    # ── Step 4: Save all recommendations (stocks + crypto) ───────────────────
     db.query(AIRecommendation).filter_by(user_id=user.id, trade_date=today()).delete()
     db.commit()
 
-    for alloc in optimized["allocations"][:5]:
+    all_picks = stock_picks + crypto_picks
+    # Re-rank by score across both asset types
+    all_picks.sort(key=lambda x: x.get("confidence", 0) + x.get("score", 0) * 0.1, reverse=True)
+
+    for rank, pick in enumerate(all_picks[:10], start=1):
         rec = AIRecommendation(
-            user_id=user.id, symbol=alloc["symbol"], rank=alloc["rank"],
-            signal=alloc["signal"], confidence=alloc["confidence"],
-            score=alloc["score"], entry=alloc["entry"],
-            exit_target=alloc["exit_target"], stop=alloc["stop"],
-            risk_reward=alloc["risk_reward"], suggested_qty=alloc["suggested_qty"],
-            suggested_alloc=alloc["suggested_alloc"], reasoning=alloc["reasoning"],
-            source="ai_scan", trade_date=today(), status="pending",
+            user_id        = user.id,
+            symbol         = pick["symbol"],
+            rank           = rank,
+            signal         = pick.get("signal","HOLD"),
+            confidence     = pick.get("confidence", 50),
+            score          = pick.get("score", 50),
+            entry          = pick.get("entry") or pick.get("price"),
+            exit_target    = pick.get("exit_target") or pick.get("exit"),
+            stop           = pick.get("stop"),
+            risk_reward    = pick.get("risk_reward"),
+            suggested_qty  = 0,
+            suggested_alloc= 0,
+            reasoning      = pick.get("reasoning",""),
+            source         = f"ai_scan_{pick.get('asset_type','stock')}",
+            trade_date     = today(),
+            status         = "pending",
         )
         db.add(rec)
     db.commit()
 
     return {
-        "status":          "scanned",
-        "date":            today(),
-        "candidates_scanned": len(candidates),
-        "recommendations": len(optimized["allocations"]),
-        "optimizer":       optimized,
-        "account":         account,
-        "goal":            goal,
+        "status":           "scanned",
+        "date":             today(),
+        "stocks_scanned":   len(stock_candidates),
+        "crypto_scanned":   len(CRYPTO_UNIVERSE),
+        "stock_picks":      len(stock_picks),
+        "crypto_picks":     len(crypto_picks),
+        "total_recommendations": len(all_picks[:10]),
     }
 
 

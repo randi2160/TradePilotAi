@@ -75,11 +75,8 @@ class HybridEngine:
 
     def ai_decide_split(self, account: dict) -> dict:
         """
-        AI decides crypto vs stock capital split based on:
-        - PDT remaining
-        - Time of day
-        - Current P&L progress
-        - Market regime
+        AI decisions respect user's configured allocation — never override it.
+        User sets max crypto% (e.g. 30%). AI only adjusts reason/label.
         """
         targets       = self._get_targets()
         realized      = self.tracker.realized_pnl if self.tracker else 0
@@ -88,59 +85,48 @@ class HybridEngine:
         pdt_exempt    = account.get("is_pdt_exempt", False)
         is_hours      = self._is_stock_hours()
         mins_to_close = self._time_to_close_min()
-        equity        = account.get("equity", 5000)
 
-        # Start with base split
-        crypto_pct = self.crypto_alloc
-        reason     = []
+        # ALWAYS use user's configured allocation — never the Alpaca equity
+        configured_capital = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
+        user_crypto_pct    = self.crypto_alloc            # e.g. 0.30 = user set 30%
+        crypto_budget      = round(configured_capital * user_crypto_pct, 2)
+        stock_budget       = round(configured_capital * (1 - user_crypto_pct), 2)
 
+        reason = []
         if not is_hours:
-            # Market closed — all crypto
-            crypto_pct = 0.80
-            reason.append("Market closed — favoring crypto (24/7)")
+            reason.append("Market closed — crypto active 24/7")
         else:
-            # PDT limited — push more to crypto
             if not pdt_exempt and pdt_remaining <= 1:
-                crypto_pct = min(0.60, crypto_pct + 0.20)
-                reason.append(f"PDT limit almost reached ({pdt_remaining} left) — shifting to crypto")
-            elif not pdt_exempt and pdt_remaining == 2:
-                crypto_pct = min(0.45, crypto_pct + 0.10)
-                reason.append("PDT conserving — slight crypto increase")
-
-            # Late in session — reduce new stock exposure
+                reason.append(f"PDT limit ({pdt_remaining} left)")
             if mins_to_close < 30:
-                crypto_pct = min(0.70, crypto_pct + 0.15)
-                reason.append(f"Only {mins_to_close:.0f}m to close — crypto preferred")
-
-            # P&L progress — if behind target, be more aggressive
+                reason.append(f"{mins_to_close:.0f}m to close")
             if pnl_progress < 0.3:
-                crypto_pct = min(0.50, crypto_pct + 0.10)
-                reason.append("Behind target — adding crypto for extra opportunities")
+                reason.append("Behind target")
             elif pnl_progress >= 1.0:
-                # Hit target — reduce risk
-                crypto_pct = max(0.10, crypto_pct - 0.15)
-                reason.append("Target achieved — reducing crypto risk")
+                reason.append("Target hit — protecting gains")
 
-        # Cap
-        crypto_pct = max(0.05, min(0.80, crypto_pct))
-        stock_pct  = 1.0 - crypto_pct
+        logger.info(
+            f"Budget: crypto=${crypto_budget} ({user_crypto_pct:.0%}) "
+            f"stocks=${stock_budget} ({1-user_crypto_pct:.0%}) — "
+            f"{'; '.join(reason) or 'Base allocation'}"
+        )
 
         decision = {
-            "crypto_pct":   round(crypto_pct, 2),
-            "stock_pct":    round(stock_pct,  2),
-            "crypto_capital": round(equity * crypto_pct, 2),
-            "stock_capital":  round(equity * stock_pct,  2),
-            "reason":       "; ".join(reason) or "Base allocation",
-            "pdt_remaining": pdt_remaining,
-            "pdt_exempt":    pdt_exempt,
-            "market_hours":  is_hours,
-            "decided_at":    datetime.now(timezone.utc).isoformat(),
+            "crypto_pct":     round(user_crypto_pct, 2),
+            "stock_pct":      round(1 - user_crypto_pct, 2),
+            "crypto_capital": crypto_budget,
+            "stock_capital":  stock_budget,
+            "reason":         "; ".join(reason) or "Base allocation",
+            "pdt_remaining":  pdt_remaining,
+            "pdt_exempt":     pdt_exempt,
+            "market_hours":   is_hours,
+            "decided_at":     datetime.now(timezone.utc).isoformat(),
         }
         self.ai_split_log.append(decision)
         if len(self.ai_split_log) > 50:
             self.ai_split_log = self.ai_split_log[-50:]
 
-        logger.info(f"AI split: crypto={crypto_pct:.0%} stocks={stock_pct:.0%} — {decision['reason']}")
+        logger.info(f"AI split: crypto={user_crypto_pct:.0%} stocks={1-user_crypto_pct:.0%} — {decision['reason']}")
         return decision
 
     def init_crypto_engine(self, account: dict, split: dict) -> CryptoEngine:
@@ -182,10 +168,12 @@ class HybridEngine:
                 if self.crypto_engine is None or self.crypto_engine.state == CryptoState.STOPPED:
                     self.crypto_engine = self.init_crypto_engine(acct, split)
                 else:
-                    # Update allocation using configured capital, not Alpaca paper equity
-                    configured = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
-                    self.crypto_engine.allocated_capital = configured * split["crypto_pct"]
+                    # Always use USER's configured budget — never the dynamic AI split %
+                    configured   = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
+                    crypto_budget = round(configured * self.crypto_alloc, 2)
+                    self.crypto_engine.allocated_capital = crypto_budget
                     self.crypto_engine.capital           = configured
+                    self.crypto_engine.crypto_alloc      = self.crypto_alloc
                     self.crypto_engine.compounded_gains  = max(0, self.crypto_engine.compounded_gains)
 
                 results["crypto"] = await self.crypto_engine.run_cycle()

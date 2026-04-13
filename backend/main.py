@@ -226,6 +226,12 @@ async def crypto_engine_loop():
         try:
             if _hybrid_engine is not None and _crypto_running:
                 result = await _hybrid_engine.run_cycle()
+
+                # Keep user context wired after lazy engine creation
+                if (_hybrid_engine.crypto_engine and
+                        not getattr(_hybrid_engine.crypto_engine, '_reporter', None)):
+                    _hybrid_engine.crypto_engine._reporter = reporter
+
                 state  = result.get("crypto", {})
                 if isinstance(state, dict):
                     engine_state = state.get("state", "idle")
@@ -402,6 +408,30 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
             try:
                 summary = bot_loop.get_live_summary()
                 summary["settings"] = settings.all()
+
+                # Merge crypto engine P&L into the top-level summary
+                global _hybrid_engine, _crypto_running
+                if _hybrid_engine is not None and _crypto_running:
+                    try:
+                        crypto_status = _hybrid_engine.get_status()
+                        crypto = crypto_status.get("crypto") or {}
+                        crypto_pnl = float(crypto.get("realized_pnl", 0))
+                        if crypto_pnl != 0:
+                            # Add crypto P&L on top of stock P&L
+                            summary["realized_pnl"] = round(
+                                float(summary.get("realized_pnl", 0)) + crypto_pnl, 2
+                            )
+                            summary["total_pnl"] = round(
+                                float(summary.get("total_pnl", 0)) + crypto_pnl, 2
+                            )
+                            summary["crypto_pnl"] = crypto_pnl
+                            summary["trade_count"] = (
+                                int(summary.get("trade_count", 0)) +
+                                int(crypto.get("trades_today", 0))
+                            )
+                    except Exception:
+                        pass
+
                 await ws.send_json(summary)
             except Exception:
                 break
@@ -504,6 +534,7 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
 
     try:
         from strategy.hybrid_engine import HybridEngine
+        from strategy.crypto_engine import CryptoPosition, EngineState
         _hybrid_engine = HybridEngine(
             broker           = broker,
             settings         = settings,
@@ -513,6 +544,38 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
             crypto_alloc_pct = body.crypto_alloc,
         )
         _crypto_running = True
+        # Wire in user context for DB saves and activity feed
+        if _hybrid_engine.crypto_engine:
+            _hybrid_engine.crypto_engine._user_id  = user.id
+            _hybrid_engine.crypto_engine._reporter = reporter
+
+        # Reconcile any existing open Alpaca crypto positions
+        try:
+            positions = broker.get_positions()
+            crypto_positions = [p for p in positions
+                if any(c in str(p.get("symbol","")).upper()
+                       for c in ["BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH","XRP","SHIB"])]
+            if crypto_positions:
+                logger.warning(f"Reconciling {len(crypto_positions)} existing crypto positions: "
+                    f"{[p.get('symbol') for p in crypto_positions]}")
+                if _hybrid_engine.crypto_engine:
+                    for p in crypto_positions:
+                        sym_raw = str(p.get("symbol",""))
+                        ticker  = sym_raw.replace("USD","").replace("/","")
+                        symbol  = f"{ticker}/USD"
+                        qty     = float(p.get("qty", 0))
+                        entry   = float(p.get("avg_entry_price", p.get("current_price", 0)))
+                        current = float(p.get("current_price", entry))
+                        upnl    = float(p.get("unrealized_pl", 0))
+                        pos = CryptoPosition(
+                            symbol=symbol, side="BUY", qty=qty,
+                            entry=entry, stop=entry*0.98, target=entry*1.02,
+                        )
+                        _hybrid_engine.crypto_engine.open_positions[symbol] = pos
+                        logger.info(f"  Reconciled: {symbol} qty={qty} entry=${entry:.4f} upnl=${upnl:+.2f}")
+                    _hybrid_engine.crypto_engine.state = EngineState.POSITION_OPEN
+        except Exception as e:
+            logger.error(f"Position reconciliation error: {e}")
         settings.set_engine_settings(
             settings._data.get("stop_new_trades_hour", 15),
             settings._data.get("stop_new_trades_minute", 30),
@@ -719,11 +782,11 @@ async def reject(symbol: str, user: User = Depends(get_current_user)):
 # Market Data
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/api/trades",         tags=["Data"])
+@app.get("/api/trades", tags=["Data"])
 async def get_trades(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    svc = TradeService(db, user.id)
+    svc    = TradeService(db, user.id)
     trades = svc.get_trades(limit=100)
-    return [
+    db_results = [
         {
             "id":            t.id,
             "symbol":        t.symbol,
@@ -737,17 +800,80 @@ async def get_trades(user: User = Depends(get_current_user), db: Session = Depen
             "net_pnl":       t.net_pnl,
             "pnl_pct":       t.pnl_pct,
             "position_value": t.position_value,
-            "risk_dollars":  t.risk_dollars,
-            "risk_pct":      t.risk_pct,
             "confidence":    t.confidence,
             "is_manual":     t.is_manual,
             "status":        t.status,
             "opened_at":     str(t.opened_at),
             "closed_at":     str(t.closed_at) if t.closed_at else None,
             "trade_date":    t.trade_date,
+            "source":        "db",
         }
         for t in trades
     ]
+
+    # Also pull today's filled Alpaca orders so crypto trades always show up
+    alpaca_results = []
+    try:
+        broker = bot_loop.broker
+        if not broker:
+            from broker.alpaca_client import AlpacaClient
+            from broker.broker_routes import _load_creds
+            import config as _cfg
+            creds = _load_creds(user)
+            if creds.get("api_key"):
+                mode   = getattr(user, "alpaca_mode", None) or getattr(_cfg, "ALPACA_MODE", "paper")
+                broker = AlpacaClient(paper=(mode != "live"),
+                                      api_key=creds["api_key"], api_secret=creds["api_secret"])
+        if broker:
+            from datetime import date
+            today_str = str(date.today())
+            try:
+                from alpaca.trading.requests import GetOrdersRequest
+                from alpaca.trading.enums   import QueryOrderStatus
+                req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=50,
+                                       after=f"{today_str}T00:00:00Z")
+                raw_orders = broker.trading.get_orders(filter=req)
+            except Exception:
+                # Fallback for older alpaca-py
+                raw_orders = broker.trading.get_orders() or []
+            db_order_ids = set()  # don't duplicate DB records
+            for o in raw_orders:
+                try:
+                    if str(getattr(o, "status", "")) != "filled":
+                        continue
+                    sym = str(getattr(o, "symbol", ""))
+                    oid = str(getattr(o, "id", ""))
+                    if oid in db_order_ids:
+                        continue
+                    filled_qty = float(getattr(o, "filled_qty", 0) or 0)
+                    fill_price = float(getattr(o, "filled_avg_price", 0) or 0)
+                    side       = str(getattr(o, "side", "buy")).upper()
+                    filled_at  = str(getattr(o, "filled_at", "") or "")
+                    pv         = round(filled_qty * fill_price, 2)
+                    alpaca_results.append({
+                        "id":            f"alpaca_{oid[:8]}",
+                        "symbol":        sym,
+                        "side":          side,
+                        "qty":           filled_qty,
+                        "entry_price":   fill_price if side == "BUY" else None,
+                        "exit_price":    fill_price if side == "SELL" else None,
+                        "pnl":           None,
+                        "status":        "filled",
+                        "position_value": pv,
+                        "opened_at":     filled_at,
+                        "closed_at":     filled_at if side == "SELL" else None,
+                        "trade_date":    today_str,
+                        "source":        "alpaca",
+                    })
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug(f"Alpaca order merge: {e}")
+
+    # Merge — DB records take priority, Alpaca fills fill the gaps
+    all_results = db_results + alpaca_results
+    all_results.sort(key=lambda x: str(x.get("opened_at", "")), reverse=True)
+    return all_results
 
 @app.get("/api/signals",        tags=["Data"])
 async def get_signals(user: User = Depends(get_current_user)):
