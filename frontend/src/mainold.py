@@ -371,11 +371,11 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
     if not broker:
         try:
             from broker.alpaca_client import AlpacaClient
-            from broker.broker_routes import _get_broker_creds
+            from broker.broker_routes import _load_creds
             import config as _cfg
 
             # Try user's saved broker keys first (from My Broker tab)
-            creds = _get_broker_creds(user, db)
+            creds = _load_creds(user)
             if creds and creds.get("api_key"):
                 mode   = getattr(user, "alpaca_mode", "paper") or "paper"
                 broker = AlpacaClient(creds["api_key"], creds["api_secret"], mode)
@@ -388,11 +388,13 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
                 logger.info("Crypto engine using .env broker keys")
             else:
                 raise HTTPException(400,
-                    "No broker keys found. Add your Alpaca API keys in My Broker tab or .env file.")
+                    "NO_BROKER: Connect your Alpaca account in the My Broker tab first, "
+                    "then start the crypto engine. Or start the Stock Bot first.")
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(400, f"Could not connect broker: {e}")
+            raise HTTPException(400, f"Broker connection failed: {e}. "
+                "Go to My Broker tab and reconnect your Alpaca account.")
 
     try:
         from strategy.hybrid_engine import HybridEngine

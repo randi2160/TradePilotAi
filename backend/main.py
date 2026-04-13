@@ -210,6 +210,22 @@ async def crypto_engine_loop():
                 state  = result.get("crypto", {})
                 if isinstance(state, dict):
                     engine_state = state.get("state", "idle")
+
+                    # Log crypto activity to the live feed
+                    try:
+                        if engine_state == "order_pending":
+                            sym = state.get("last_symbol", "CRYPTO")
+                            reporter.log("entry", sym, f"Crypto order submitted: {sym}", state)
+                        elif engine_state == "ready_for_reentry":
+                            sym = state.get("last_symbol", "CRYPTO")
+                            pnl = state.get("realized_pnl", 0)
+                            reporter.log("exit", sym, f"Crypto trade closed | P&L ${pnl:.2f}", state)
+                        elif engine_state == "stopped_for_day":
+                            reason = state.get("stop_reason", "Target reached")
+                            reporter.log("system", "CRYPTO", f"Crypto engine stopped: {reason}", state)
+                    except Exception:
+                        pass
+
                     if engine_state == "stopped_for_day":
                         logger.info(f"Crypto engine stopped for day: {state.get('stop_reason')}")
                         _crypto_running = False
@@ -371,28 +387,28 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
     if not broker:
         try:
             from broker.alpaca_client import AlpacaClient
-            from broker.broker_routes import _get_broker_creds
+            from broker.broker_routes import _load_creds
             import config as _cfg
 
-            # Try user's saved broker keys first (from My Broker tab)
-            creds = _get_broker_creds(user, db)
-            if creds and creds.get("api_key"):
-                mode   = getattr(user, "alpaca_mode", "paper") or "paper"
-                broker = AlpacaClient(creds["api_key"], creds["api_secret"], mode)
-                logger.info(f"Crypto engine using user saved broker keys (mode={mode})")
-            elif _cfg.ALPACA_API_KEY:
-                # Fall back to .env keys
-                broker = AlpacaClient(_cfg.ALPACA_API_KEY,
-                                      getattr(_cfg, 'ALPACA_SECRET_KEY', ''),
-                                      getattr(_cfg, 'ALPACA_MODE', 'paper'))
-                logger.info("Crypto engine using .env broker keys")
-            else:
+            # _load_creds checks: 1) user saved keys, 2) legacy alpaca fields, 3) .env fallback
+            creds = _load_creds(user)
+            if not creds.get("api_key"):
                 raise HTTPException(400,
-                    "No broker keys found. Add your Alpaca API keys in My Broker tab or .env file.")
+                    "NO_BROKER: No Alpaca API keys found. Add them to your .env file "
+                    "or connect your account in the My Broker tab.")
+
+            mode   = getattr(user, "alpaca_mode", None) or getattr(_cfg, "ALPACA_MODE", "paper")
+            broker = AlpacaClient(
+                paper      = (mode != "live"),
+                api_key    = creds["api_key"],
+                api_secret = creds["api_secret"],
+            )
+            logger.info(f"Crypto engine broker ready (mode={mode})")
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(400, f"Could not connect broker: {e}")
+            raise HTTPException(400, f"Broker connection failed: {e}. "
+                "Go to My Broker tab and reconnect your Alpaca account.")
 
     try:
         from strategy.hybrid_engine import HybridEngine

@@ -75,11 +75,11 @@ class CryptoEngine:
         max_daily_loss: float = 100,
         capital:        float = 5000,
         crypto_alloc:   float = 0.30,   # fraction of capital for crypto
-        min_scalp_profit: float = 15,   # min $ per scalp
+        min_scalp_profit: float = 5,    # min $ per scalp (realistic for $2K budget)
         max_scalp_hold_min: int = 15,   # max hold before forced exit
         max_risk_pct:   float = 0.005,  # 0.5% risk per trade
         compound_mode:  bool  = True,
-        min_probability: float = 0.60,
+        min_probability: float = 0.40,   # lowered from 0.60 — crypto is volatile enough
         stop_at_min_target: bool = False,
         max_positions:  int   = 2,
     ):
@@ -128,11 +128,16 @@ class CryptoEngine:
             return self.last_account_state
 
     def get_non_marginable_buying_power(self) -> float:
-        """Crypto must use non_marginable_buying_power = settled_cash - pending_fills."""
-        acct = self.refresh_account()
-        # Prefer explicit field, fall back to cash
-        nmbp = acct.get("non_marginable_buying_power") or acct.get("cash", 0)
-        return float(nmbp)
+        """
+        Return the LESSER of Alpaca's actual buying power and
+        the user's configured crypto budget (capital × alloc%).
+        Prevents the engine from using the full $100K Alpaca paper balance.
+        """
+        acct  = self.refresh_account()
+        nmbp  = float(acct.get("non_marginable_buying_power") or acct.get("cash", 0))
+        # Cap at user's configured crypto allocation
+        budget = self.capital * self.crypto_alloc
+        return min(nmbp, budget)
 
     def wait_for_fill(self, order_id: str, timeout: int = 30) -> bool:
         """Poll until order is filled or timeout. Returns True if filled."""
@@ -260,14 +265,14 @@ class CryptoEngine:
             atr_pct    = atr / price * 100
             vol_score  = min(100, max(0, (atr_pct - 0.3) / 1.5 * 100)) if atr_pct < 2 else 100 - (atr_pct - 2) * 20
 
-            # Expected move (1 ATR target)
+            # Expected move (1.5 ATR target)
             expected_move = atr * 1.5
-            # Can we hit min_scalp_profit with reasonable position?
-            max_size  = self.get_non_marginable_buying_power() * 0.3
-            if max_size <= 0:
-                max_size = self.allocated_capital * 0.3
-            units     = max_size / price
-            exp_profit = units * expected_move
+            # Use configured crypto budget for position sizing during scan
+            # (live buying power checked again at actual order time)
+            scan_capital  = self.allocated_capital if self.allocated_capital > 0 else self.capital * self.crypto_alloc
+            max_size      = scan_capital * 0.3
+            units         = max_size / price if price > 0 else 0
+            exp_profit    = units * expected_move
 
             # Composite score
             score = 0
@@ -400,15 +405,15 @@ class CryptoEngine:
         candidates    = await self._scan_candidates()
         valid         = [c for c in candidates if c.get("valid")]
 
-        # Store scan results for dashboard visibility
+        # Store scan results — convert numpy types to Python native for JSON serialization
         self._scan_results = [
             {
-                "symbol": c.get("symbol",""),
-                "score":  round(c.get("score", 0), 0),
-                "prob":   round(c.get("probability", 0) * 100, 0),
-                "valid":  c.get("valid", False),
-                "price":  c.get("price", 0),
-                "momentum": round(c.get("momentum", 0), 2),
+                "symbol":   str(c.get("symbol", "")),
+                "score":    float(round(c.get("score", 0), 0)),
+                "prob":     float(round(c.get("probability", 0) * 100, 0)),
+                "valid":    bool(c.get("valid", False)),
+                "price":    float(c.get("price", 0)),
+                "momentum": float(round(c.get("momentum", 0), 2)),
             }
             for c in candidates[:8]
         ]
@@ -490,26 +495,36 @@ class CryptoEngine:
 
     async def _scan_candidates(self) -> List[dict]:
         candidates = []
+        logger.info(f"🔍 Crypto scan starting — checking {len(CRYPTO_TICKERS[:6])} symbols")
         for ticker in CRYPTO_TICKERS[:6]:
             try:
                 symbol = f"{ticker}/USD"
-                # Try crypto bars, fall back to stock bars call with crypto symbol
                 bars = None
                 try:
                     bars = self.broker.get_crypto_bars(ticker, "1Min", 50)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"  get_crypto_bars({ticker}) threw: {e}")
+
                 if bars is None or len(bars) == 0:
-                    bars = self.broker.get_bars(ticker, "1Min", 50)
-                if bars is not None and len(bars) > 10:
-                    scored = self.score_crypto_candidate(symbol, bars)
-                    scored["ticker"] = ticker
-                    candidates.append(scored)
-                    logger.debug(f"Scored {ticker}: {scored.get('score',0):.0f}")
+                    logger.warning(f"  {ticker}: no bars returned — skipping")
+                    self._last_error = f"No bar data for {ticker} — API may need different symbol format"
+                    continue
+
+                logger.info(f"  {ticker}: {len(bars)} bars, last close=${bars['close'].iloc[-1]:.4f}")
+                scored = self.score_crypto_candidate(symbol, bars)
+                scored["ticker"] = ticker
+                scored["price"]  = float(bars["close"].iloc[-1])
+                candidates.append(scored)
             except Exception as e:
-                logger.warning(f"Scan {ticker}: {e}")
+                logger.warning(f"  Scan {ticker}: {e}")
                 self._last_error = f"Scan {ticker}: {e}"
+
         candidates.sort(key=lambda x: x["score"], reverse=True)
+        if candidates:
+            best = candidates[0]
+            logger.info(f"✅ Scan done — best: {best.get('symbol')} score={best.get('score',0):.0f} valid={best.get('valid')}")
+        else:
+            logger.warning("⚠️  Scan returned 0 candidates — check crypto API access")
         return candidates
 
     async def _manage_positions(self):
@@ -577,6 +592,22 @@ class CryptoEngine:
             logger.error(f"Exit position {sym}: {e}")
 
     def status(self) -> dict:
+        import numpy as _np
+
+        def _safe(v):
+            """Convert numpy scalars to Python natives so FastAPI can JSON-encode them."""
+            if isinstance(v, (_np.bool_, _np.bool8 if hasattr(_np, 'bool8') else _np.bool_)):
+                return bool(v)
+            if isinstance(v, (_np.integer,)):
+                return int(v)
+            if isinstance(v, (_np.floating,)):
+                return float(v)
+            return v
+
+        bp_raw = float(self.last_account_state.get("non_marginable_buying_power",
+                       self.last_account_state.get("cash", 0))) if self.last_account_state else 0.0
+        budget = round(self.capital * self.crypto_alloc, 2)
+
         return {
             "state":             self.state.value,
             "realized_pnl":      round(self.realized_pnl, 2),
@@ -590,18 +621,21 @@ class CryptoEngine:
             "last_error":        self._last_error,
             "cycle":             self.cycle_count,
             "min_probability":   self.min_probability,
-            "scan_results":      self._scan_results,
+            "buying_power":      round(min(bp_raw, budget), 2) if bp_raw else budget,
+            "crypto_budget":     budget,
+            "scan_results": [
+                {k: _safe(v) for k, v in s.items()}
+                for s in self._scan_results
+            ],
             "open_position_list": [
                 {
                     "symbol": sym,
-                    "qty":    pos.qty,
-                    "entry":  pos.entry,
-                    "stop":   pos.stop,
-                    "target": pos.target,
-                    "side":   pos.side,
+                    "qty":    float(pos.qty),
+                    "entry":  float(pos.entry),
+                    "stop":   float(pos.stop),
+                    "target": float(pos.target),
+                    "side":   str(pos.side),
                 }
                 for sym, pos in self.open_positions.items()
             ],
-            "buying_power": self.last_account_state.get("non_marginable_buying_power",
-                             self.last_account_state.get("cash", 0)),
         }

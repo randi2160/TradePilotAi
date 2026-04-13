@@ -133,7 +133,12 @@ function LiveEngineStatus({ data, engineStatus, dualSummary, todayStats }) {
       setMsg('OK: ' + r.data.message)
       setTimeout(() => setMsg(''), 5000)
     } catch (e) {
-      setMsg('ERR: ' + (e.response?.data?.detail || e.message))
+      const detail = e.response?.data?.detail || e.message || ''
+      if (detail.includes('NO_BROKER') || detail.includes('Connect your Alpaca')) {
+        setMsg('ERR: No broker connected — go to My Broker tab and connect your Alpaca account first.')
+      } else {
+        setMsg('ERR: ' + detail)
+      }
     } finally { setStarting(false) }
   }
 
@@ -301,7 +306,14 @@ function CryptoLivePanel({ engineStatus }) {
         <span className="font-bold text-white text-sm">Crypto Engine — Live View</span>
         <span className="text-xs text-gray-500">Cycle #{crypto.cycle || 0} · Every 30s</span>
         <div className="ml-auto flex items-center gap-3 text-xs">
-          <span className="text-gray-500">Buying power: <span className="text-white font-bold">{'$'}{(crypto.buying_power || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}</span></span>
+          <span className="text-gray-500">
+            Crypto budget: <span className="text-white font-bold">
+              {'$'}{(crypto.crypto_budget || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}
+            </span>
+            {crypto.crypto_budget === 0 && (
+              <span className="text-yellow-400 ml-1">(restart engine to load)</span>
+            )}
+          </span>
           <span className={cls('font-bold', (crypto.realized_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
             P&L: {pnlStr(crypto.realized_pnl || 0)}
           </span>
@@ -310,7 +322,39 @@ function CryptoLivePanel({ engineStatus }) {
 
       <div className="p-4 space-y-4">
 
-        {/* Open positions */}
+        {/* Trading status — the most important thing to show */}
+        <div className={cls('flex items-center gap-3 p-3 rounded-xl border',
+          state === 'position_open' ? 'bg-green-900/20 border-green-700/50' :
+          state === 'stopped_for_day' ? 'bg-dark-700 border-dark-600' :
+          state === 'error' ? 'bg-red-900/20 border-red-800/40' :
+          'bg-dark-700 border-dark-600')}>
+          <span className="text-2xl">{STATE_ICON[state] || '₿'}</span>
+          <div className="flex-1">
+            <div className={cls('font-bold text-sm',
+              state === 'position_open' ? 'text-green-400' :
+              state === 'locked_profit_mode' ? 'text-green-400' :
+              state === 'stopped_for_day' ? 'text-gray-400' :
+              state === 'error' ? 'text-red-400' : 'text-white')}>
+              {state === 'idle' && 'Waiting — markets quiet, rescanning every 30s'}
+              {state === 'scanning' && '📡 Actively scanning for entry...'}
+              {state === 'candidate_ranked' && '🎯 Found a candidate — calculating position size'}
+              {state === 'sizing' && '📐 Sizing the position...'}
+              {state === 'order_pending' && '📤 Order submitted — waiting for fill'}
+              {state === 'position_open' && '📈 IN A TRADE — monitoring for exit'}
+              {state === 'exit_pending' && '📤 Closing position...'}
+              {state === 'funds_refreshing' && '🔄 Waiting for funds to settle'}
+              {state === 'ready_for_reentry' && '✅ Trade complete — looking for next entry'}
+              {state === 'locked_profit_mode' && '🔒 Profit locked — still trading'}
+              {state === 'stopped_for_day' && '🏁 Done for today — target hit or floor triggered'}
+              {state === 'error' && '⚠️ Error — ' + (crypto.last_error || 'check logs')}
+            </div>
+            <div className="text-xs text-gray-500 mt-0.5">
+              Trades today: <span className="text-white font-bold">{crypto.trades_today || 0}</span>
+              {' · '}Session P&L: <span className={cls('font-bold', (crypto.realized_pnl||0) >= 0 ? 'text-green-400' : 'text-red-400')}>{pnlStr(crypto.realized_pnl||0)}</span>
+              {' · '}To target: <span className="text-brand-400 font-bold">{'$'}{(crypto.remaining_to_min||0).toFixed(2)}</span>
+            </div>
+          </div>
+        </div>
         {openList.length > 0 && (
           <div>
             <p className="text-xs font-bold text-white mb-2">📈 Open Crypto Positions</p>
@@ -334,7 +378,9 @@ function CryptoLivePanel({ engineStatus }) {
           <div>
             <p className="text-xs font-bold text-white mb-2">
               📡 Last Scan Results
-              <span className="text-gray-500 font-normal ml-2">— scored {scans.length} symbols, looking for score &gt; 60</span>
+              <span className="text-gray-500 font-normal ml-2">
+                — scored {scans.length} symbols · needs score &gt; 40 to trade
+              </span>
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {scans.map((s, i) => (

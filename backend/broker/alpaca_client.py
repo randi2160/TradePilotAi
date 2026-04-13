@@ -39,8 +39,10 @@ class AlpacaClient:
     def __init__(self, paper: bool = True, api_key: str = None, api_secret: str = None):
         self.paper = paper
         # Use passed credentials or fall back to .env
-        key    = api_key    or config.ALPACA_API_KEY
-        secret = api_secret or config.ALPACA_SECRET_KEY
+        self.api_key    = api_key    or config.ALPACA_API_KEY
+        self.secret_key = api_secret or config.ALPACA_SECRET_KEY
+        key    = self.api_key
+        secret = self.secret_key
         self.trading = TradingClient(
             api_key=key, secret_key=secret, paper=paper,
         )
@@ -126,48 +128,90 @@ class AlpacaClient:
             return pd.DataFrame()
 
     def get_crypto_bars(self, symbol: str, timeframe: str = "1Min", limit: int = 300) -> pd.DataFrame:
-        """Get OHLCV bars for crypto using stock bars endpoint with crypto symbol."""
+        """Get OHLCV bars for crypto — yfinance primary (free), Alpaca secondary (paid plan)."""
+        pair = symbol.upper()
+        if "/" not in pair:
+            pair = f"{pair}/USD"
+
+        # Method 1: yfinance (free, works with basic Alpaca plan)
         try:
-            tf  = _TF_MAP.get(timeframe, _TF_MAP["1Min"])
-            req = StockBarsRequest(
-                symbol_or_symbols=symbol.upper(),
-                timeframe=tf,
-                start=datetime.now(timezone.utc) - timedelta(days=2),
-                limit=limit,
-            )
-            bars = self.data.get_stock_bars(req)
-            df   = bars.df
-            if isinstance(df.index, pd.MultiIndex):
-                df = df.xs(symbol.upper(), level=0)
-            df.index = pd.to_datetime(df.index)
-            # Normalize column names (Alpaca sometimes uses different cases)
-            df.columns = [c.lower() for c in df.columns]
-            available = [c for c in ["open","high","low","close","volume"] if c in df.columns]
-            if len(available) < 3:
-                return pd.DataFrame()
-            return df[available].copy()
+            import yfinance as yf
+            ticker_map = {
+                "BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD", "SOL/USD": "SOL-USD",
+                "DOGE/USD": "DOGE-USD", "LINK/USD": "LINK-USD", "AAVE/USD": "AAVE-USD",
+                "LTC/USD":  "LTC-USD",  "BCH/USD":  "BCH-USD",
+            }
+            interval_map = {"1Min": "1m", "5Min": "5m", "15Min": "15m", "1Hour": "60m", "1Day": "1d"}
+            yf_sym   = ticker_map.get(pair, pair.replace("/", "-"))
+            interval = interval_map.get(timeframe, "1m")
+            period   = "1d" if interval in ("1m", "5m") else "5d"
+            df = yf.download(yf_sym, period=period, interval=interval,
+                             progress=False, auto_adjust=True)
+            if df is not None and not df.empty and len(df) > 5:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df = df.droplevel(1, axis=1)
+                df.columns = [c.lower() for c in df.columns]
+                available = [c for c in ["open","high","low","close","volume"] if c in df.columns]
+                if len(available) >= 4:
+                    result = df[available].tail(limit).copy()
+                    logger.info(f"Crypto bars {pair} via yfinance: {len(result)} rows, last close=${result['close'].iloc[-1]:.2f}")
+                    return result
+        except ImportError:
+            logger.warning("yfinance not installed — run: pip install yfinance")
         except Exception as e:
-            logger.debug(f"get_crypto_bars({symbol}): {e}")
-            return pd.DataFrame()
+            logger.warning(f"yfinance error ({pair}): {e}")
+
+        # Method 2: Alpaca v1beta3 (requires paid plan)
+        import requests as _req
+        try:
+            api_key    = getattr(self, "api_key", None) or getattr(self, "key", "")
+            secret_key = getattr(self, "secret_key", None) or getattr(self, "secret", "")
+            if not api_key:
+                import config as _cfg
+                api_key, secret_key = _cfg.ALPACA_API_KEY, _cfg.ALPACA_SECRET_KEY
+            tf_map = {"1Min": "1Min", "5Min": "5Min", "15Min": "15Min", "1Hour": "1Hour", "1Day": "1Day"}
+            resp = _req.get(
+                "https://data.alpaca.markets/v1beta3/crypto/us/bars",
+                params={"symbols": pair, "timeframe": tf_map.get(timeframe,"1Min"), "limit": limit, "sort": "asc"},
+                headers={"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret_key},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                bars_data = resp.json().get("bars", {}).get(pair, [])
+                if bars_data and len(bars_data) > 3:
+                    df = pd.DataFrame(bars_data).rename(
+                        columns={"t":"timestamp","o":"open","h":"high","l":"low","c":"close","v":"volume"})
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    df = df.set_index("timestamp")
+                    available = [c for c in ["open","high","low","close","volume"] if c in df.columns]
+                    logger.info(f"Crypto bars {pair} via Alpaca: {len(df)} rows")
+                    return df[available].copy()
+        except Exception as e:
+            logger.debug(f"Alpaca crypto bars ({pair}): {e}")
+
+        return pd.DataFrame()
 
     def get_latest_crypto_price(self, symbol: str) -> float:
-        """Get latest price for a crypto symbol."""
-        if not _HAS_CRYPTO:
-            return 0.0
+        """Get latest crypto price via yfinance."""
         try:
-            from alpaca.data import CryptoHistoricalDataClient
-            from alpaca.data.requests import CryptoLatestQuoteRequest
-            pair   = symbol.upper()
-            if "/" not in pair:
-                pair = f"{pair}/USD"
-            client = CryptoHistoricalDataClient()
-            req    = CryptoLatestQuoteRequest(symbol_or_symbols=pair)
-            quote  = client.get_crypto_latest_quote(req)
-            q      = quote[pair]
-            return float((q.ask_price + q.bid_price) / 2) if q.ask_price else float(q.bid_price)
+            import yfinance as yf
+            ticker_map = {
+                "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
+                "DOGE": "DOGE-USD", "LINK": "LINK-USD", "AAVE": "AAVE-USD",
+                "LTC": "LTC-USD",  "BCH": "BCH-USD",
+            }
+            base   = symbol.upper().split("/")[0]
+            yf_sym = ticker_map.get(base, base + "-USD")
+            df     = yf.download(yf_sym, period="1d", interval="1m", progress=False, auto_adjust=True)
+            if df is not None and not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df = df.droplevel(1, axis=1)
+                df.columns = [c.lower() for c in df.columns]
+                if "close" in df.columns:
+                    return float(df["close"].iloc[-1])
         except Exception as e:
             logger.debug(f"get_latest_crypto_price({symbol}): {e}")
-            return 0.0
+        return 0.0
 
     def get_latest_price(self, symbol: str) -> float:
         try:
@@ -182,19 +226,34 @@ class AlpacaClient:
 
     # ── Orders ────────────────────────────────────────────────────────────────
 
+    def _crypto_symbol(self, symbol: str) -> str:
+        """Normalize crypto symbol for Alpaca trading API."""
+        s = symbol.upper().replace("-", "/")
+        if "/" not in s:
+            s = f"{s}/USD"
+        return s
+
+    def _is_crypto(self, symbol: str) -> bool:
+        CRYPTO = {"BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH","UNI","ADA","MATIC","XRP"}
+        base = symbol.upper().split("/")[0].split("-")[0]
+        return base in CRYPTO
+
     def place_market_order(self, symbol: str, qty: float, side: str) -> dict:
         try:
+            is_crypto = self._is_crypto(symbol)
+            sym = self._crypto_symbol(symbol) if is_crypto else symbol.upper()
+            tif = TimeInForce.GTC if is_crypto else TimeInForce.DAY
             req = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL,
-                time_in_force=TimeInForce.DAY,
+                symbol        = sym,
+                qty           = qty,
+                side          = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL,
+                time_in_force = tif,
             )
             order = self.trading.submit_order(req)
-            logger.info(f"ORDER {side} {qty}x{symbol} submitted ({order.id})")
+            logger.info(f"ORDER {side} {qty}x{sym} submitted ({order.id})")
             return {
                 "id":     str(order.id),
-                "symbol": symbol,
+                "symbol": sym,
                 "qty":    qty,
                 "side":   side,
                 "status": str(order.status),
@@ -207,34 +266,34 @@ class AlpacaClient:
         self, symbol: str, qty: float, side: str,
         stop_loss: float, take_profit: float,
     ) -> dict:
-        """Place a bracket (entry + stop + target) order in one shot."""
+        """Place bracket order. Falls back to market + separate stop for crypto."""
+        is_crypto = self._is_crypto(symbol)
+        sym = self._crypto_symbol(symbol) if is_crypto else symbol.upper()
+        tif = TimeInForce.GTC if is_crypto else TimeInForce.DAY
         try:
             order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
-            from alpaca.trading.requests import MarketOrderRequest
-            from alpaca.trading.models import OrderClass, TakeProfitRequest, StopLossRequest
-
             req = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=order_side,
-                time_in_force=TimeInForce.DAY,
-                order_class="bracket",
-                take_profit={"limit_price": round(take_profit, 2)},
-                stop_loss={"stop_price": round(stop_loss, 2)},
+                symbol        = sym,
+                qty           = qty,
+                side          = order_side,
+                time_in_force = tif,
+                order_class   = "bracket",
+                take_profit   = {"limit_price": round(take_profit, 4)},
+                stop_loss     = {"stop_price":  round(stop_loss,   4)},
             )
             order = self.trading.submit_order(req)
-            logger.info(f"BRACKET {side} {qty}x{symbol} | SL={stop_loss} TP={take_profit}")
-            return {"id": str(order.id), "symbol": symbol, "status": str(order.status)}
+            logger.info(f"BRACKET {side} {qty}x{sym} | SL={stop_loss:.4f} TP={take_profit:.4f}")
+            return {"id": str(order.id), "symbol": sym, "status": str(order.status)}
         except Exception as e:
-            # Fall back to simple market order if bracket fails
             logger.warning(f"Bracket order failed, falling back to market: {e}")
-            return self.place_market_order(symbol, qty, side)
+            return self.place_market_order(sym, qty, side)
 
     def close_position(self, symbol: str) -> dict:
         try:
-            self.trading.close_position(symbol)
-            logger.info(f"Position {symbol} closed")
-            return {"status": "closed", "symbol": symbol}
+            sym = self._crypto_symbol(symbol) if self._is_crypto(symbol) else symbol.upper()
+            self.trading.close_position(sym)
+            logger.info(f"Position {sym} closed")
+            return {"status": "closed", "symbol": sym}
         except Exception as e:
             logger.error(f"close_position({symbol}) error: {e}")
             return {"error": str(e)}
