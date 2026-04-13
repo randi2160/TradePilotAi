@@ -70,7 +70,42 @@ class DynamicRiskManager:
         # Cap at max position size
         max_value  = self.capital * self.max_pos_pct
         max_shares = max_value / price
-        shares     = max(1, round(min(raw_shares, max_shares)))
+
+        # Also cap by actual available buying power from broker
+        try:
+            from scheduler.bot_loop import bot_loop
+            if bot_loop.broker:
+                acct = bot_loop.broker.get_account()
+                dtbp = float(acct.get("daytrading_buying_power", 0) or 0)
+                nmbp = float(acct.get("non_marginable_buying_power", 0) or 0)
+                avail = dtbp if dtbp > 100 else nmbp
+                avail = min(avail, self.capital)  # never exceed configured capital
+                if avail > 10:
+                    bp_shares = (avail * 0.40) / price  # use max 40% of available per trade
+                    max_shares = min(max_shares, bp_shares)
+        except Exception:
+            pass
+
+        # Apply capital planner's per-trade stock budget (T+1 settlement aware)
+        try:
+            from main import _hybrid_engine
+            if _hybrid_engine and _hybrid_engine.planner:
+                plan = _hybrid_engine.planner.get_or_create_plan()
+                should_stop, stop_reason = plan.should_stop_trading()
+                if should_stop:
+                    return self._block(f"Day plan: {stop_reason}", price, atr)
+                planner_max = plan.stock_per_trade / price
+                max_shares  = min(max_shares, planner_max)
+                if plan.remaining_stock_budget() < price:
+                    return self._block(
+                        f"Stock budget depleted — "
+                        f"${plan.stock_deployed:.0f} of ${plan.stock_budget:.0f} used (T+1 locked)",
+                        price, atr
+                    )
+        except Exception:
+            pass
+
+        shares = max(1, round(min(raw_shares, max_shares)))
 
         stop_loss   = round(price - stop_dist, 2)
         take_profit = round(price + stop_dist * self.atr_target_mult, 2)

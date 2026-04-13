@@ -36,7 +36,8 @@ export default function Settings() {
   const [msg,     setMsg]     = useState('')
   // Engine settings
   const [engineMode,    setEngineMode]    = useState('stocks_only')
-  const [cryptoAlloc,   setCryptoAlloc]   = useState(30)
+  const [cryptoAlloc,          setCryptoAlloc]          = useState(30)
+  const [afterHoursCryptoAlloc, setAfterHoursCryptoAlloc] = useState(80)
   const [stopHour,      setStopHour]      = useState(15)
   const [stopMinute,    setStopMinute]    = useState(30)
   const [maxPositions,  setMaxPositions]  = useState(3)
@@ -54,6 +55,7 @@ export default function Settings() {
       setWl(s.watchlist ?? [])
       setEngineMode(s.engine_mode   || 'stocks_only')
       setCryptoAlloc(Math.round((s.crypto_alloc_pct || 0.30) * 100))
+      setAfterHoursCryptoAlloc(Math.round((s.after_hours_crypto_alloc_pct || 0.80) * 100))
       setStopHour(s.stop_new_trades_hour   ?? 15)
       setStopMinute(s.stop_new_trades_minute ?? 30)
       setMaxPositions(s.max_open_positions   ?? 3)
@@ -240,29 +242,50 @@ export default function Settings() {
 
         {/* Crypto allocation slider (only for hybrid) */}
         {engineMode === 'hybrid' && (
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-gray-400">
-              Crypto Allocation: <span className="text-brand-400">{cryptoAlloc}%</span>
-              <span className="text-gray-600 ml-2">(Stocks: {100 - cryptoAlloc}%)</span>
-            </label>
-            <input type="range" min={10} max={70} step={5} value={cryptoAlloc}
-              onChange={e => setCryptoAlloc(Number(e.target.value))}
-              className="w-full accent-brand-500"/>
-            <div className="flex justify-between text-xs text-gray-600">
-              <span>10% Crypto</span><span>40% Split</span><span>70% Crypto</span>
+          <div className="space-y-3">
+            {/* Market Hours Allocation */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400">
+                Market Hours Crypto: <span className="text-brand-400">{cryptoAlloc}%</span>
+                <span className="text-gray-600 ml-2">(Stocks: {100 - cryptoAlloc}%)</span>
+              </label>
+              <input type="range" min={10} max={70} step={5} value={cryptoAlloc}
+                onChange={e => setCryptoAlloc(Number(e.target.value))}
+                className="w-full accent-brand-500"/>
+              <div className="flex justify-between text-xs text-gray-600">
+                <span>10% Crypto</span><span>40% Split</span><span>70% Crypto</span>
+              </div>
             </div>
+
+            {/* After Hours Allocation */}
+            <div className="space-y-2 border border-yellow-900/40 rounded-xl p-3 bg-yellow-900/10">
+              <label className="text-xs font-bold text-yellow-400">
+                🌙 After Hours / Weekends / Holidays: <span className="text-yellow-300">{afterHoursCryptoAlloc}%</span>
+              </label>
+              <p className="text-xs text-gray-500">When market is closed, crypto gets this % of your capital. Resets automatically at 9:30 AM on trading days.</p>
+              <input type="range" min={50} max={100} step={5} value={afterHoursCryptoAlloc}
+                onChange={e => setAfterHoursCryptoAlloc(Number(e.target.value))}
+                className="w-full accent-yellow-500"/>
+              <div className="flex justify-between text-xs text-gray-600">
+                <span>50% (conservative)</span><span>80% (default)</span><span>100% (all-in)</span>
+              </div>
+            </div>
+
+            {/* Budget display — market vs after hours */}
             <div className="grid grid-cols-2 gap-2 text-xs text-center">
               {cfg?.capital && [
-                { l: 'Crypto Budget', v: `$${((cfg.capital * cryptoAlloc / 100)).toFixed(0)}`, c: 'text-yellow-400' },
-                { l: 'Stock Budget',  v: `$${((cfg.capital * (100-cryptoAlloc) / 100)).toFixed(0)}`, c: 'text-brand-400' },
+                { l: '📈 Market Hours Crypto', v: `$${(cfg.capital * cryptoAlloc / 100).toFixed(0)}`, c: 'text-yellow-400' },
+                { l: '📊 Market Hours Stocks', v: `$${(cfg.capital * (100-cryptoAlloc) / 100).toFixed(0)}`, c: 'text-brand-400' },
+                { l: '🌙 After Hours Crypto',  v: `$${(cfg.capital * afterHoursCryptoAlloc / 100).toFixed(0)}`, c: 'text-yellow-300' },
+                { l: '💤 After Hours Stocks',  v: '$0 (idle)', c: 'text-gray-500' },
               ].map(({ l, v, c }) => (
                 <div key={l} className="bg-dark-700 rounded-lg p-2">
-                  <div className="text-gray-500">{l}</div>
+                  <div className="text-gray-500 text-xs">{l}</div>
                   <div className={`font-bold mt-0.5 ${c}`}>{v}</div>
                 </div>
               ))}
             </div>
-            <p className="text-xs text-gray-600">AI dynamically adjusts this split based on PDT remaining, time of day, and P&L progress.</p>
+            <p className="text-xs text-gray-600">Crypto trades 24/7 with no PDT restrictions. After hours it gets a bigger budget to compound overnight.</p>
           </div>
         )}
 
@@ -322,11 +345,12 @@ export default function Settings() {
           try {
             const { api } = await import('../hooks/useAuth')
             await api.put('/settings/engine', {
-              stop_new_trades_hour:   stopHour,
-              stop_new_trades_minute: stopMinute,
-              max_open_positions:     maxPositions,
-              engine_mode:            engineMode,
-              crypto_alloc_pct:       cryptoAlloc / 100,
+              stop_new_trades_hour:         stopHour,
+              stop_new_trades_minute:       stopMinute,
+              max_open_positions:           maxPositions,
+              engine_mode:                  engineMode,
+              crypto_alloc_pct:             cryptoAlloc / 100,
+              after_hours_crypto_alloc_pct: afterHoursCryptoAlloc / 100,
             })
             flash('✅ Engine settings saved!')
           } catch(e) {

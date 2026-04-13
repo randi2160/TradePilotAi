@@ -52,7 +52,24 @@ class HybridEngine:
 
         self.crypto_engine: Optional[CryptoEngine] = None
         self._running      = False
-        self.ai_split_log  = []   # history of AI split decisions
+        self.ai_split_log  = []
+
+        # After-hours crypto allocation (user-configurable, default 80%)
+        try:
+            self.after_hours_crypto_alloc = float(
+                settings.get_after_hours_crypto_alloc()
+                if hasattr(settings, 'get_after_hours_crypto_alloc') else 0.80
+            )
+        except Exception:
+            self.after_hours_crypto_alloc = 0.80
+
+        # Smart capital planner
+        try:
+            from strategy.capital_planner import CapitalPlanner
+            self.planner = CapitalPlanner(settings, broker, crypto_alloc_pct)
+        except Exception as e:
+            self.planner = None
+            logger.warning(f"CapitalPlanner unavailable: {e}")
 
     def _get_targets(self) -> dict:
         t = self.settings.get_targets()
@@ -68,6 +85,20 @@ class HybridEngine:
         h   = now.hour + now.minute / 60
         return 9.583 <= h <= 15.5  # 9:35 AM – 3:30 PM ET
 
+    def _is_market_day(self) -> bool:
+        """True if today is a trading day — weekday + not a US market holiday."""
+        now = datetime.now(ET)
+        if now.weekday() >= 5:
+            return False
+        try:
+            from alpaca.trading.requests import GetCalendarRequest
+            today_str = now.strftime("%Y-%m-%d")
+            req = GetCalendarRequest(start=today_str, end=today_str)
+            cal = self.broker.trading.get_calendar(req)
+            return len(cal) > 0
+        except Exception:
+            return True  # fallback: trust weekday check
+
     def _time_to_close_min(self) -> float:
         now   = datetime.now(ET)
         close = now.replace(hour=15, minute=30, second=0)
@@ -75,58 +106,79 @@ class HybridEngine:
 
     def ai_decide_split(self, account: dict) -> dict:
         """
-        AI decisions respect user's configured allocation — never override it.
-        User sets max crypto% (e.g. 30%). AI only adjusts reason/label.
+        Smart allocation:
+        - Market hours on trading day → user's configured split (e.g. 30/70)
+        - After hours / weekend / holiday → expanded crypto (e.g. 80-100%)
+        - Auto-resets before market open on next trading day
         """
-        targets       = self._get_targets()
-        realized      = self.tracker.realized_pnl if self.tracker else 0
-        pnl_progress  = realized / targets["min"] if targets["min"] > 0 else 0
-        pdt_remaining = account.get("day_trades_remaining", 3)
-        pdt_exempt    = account.get("is_pdt_exempt", False)
-        is_hours      = self._is_stock_hours()
-        mins_to_close = self._time_to_close_min()
+        targets        = self._get_targets()
+        realized       = self.tracker.realized_pnl if self.tracker else 0
+        pnl_progress   = realized / targets.get("min", 150) if targets.get("min", 0) > 0 else 0
+        pdt_remaining  = account.get("day_trades_remaining", 3)
+        pdt_exempt     = account.get("is_pdt_exempt", False)
+        is_hours       = self._is_stock_hours()
+        is_trading_day = self._is_market_day()
+        mins_to_close  = self._time_to_close_min()
 
-        # ALWAYS use user's configured allocation — never the Alpaca equity
-        configured_capital = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
-        user_crypto_pct    = self.crypto_alloc            # e.g. 0.30 = user set 30%
-        crypto_budget      = round(configured_capital * user_crypto_pct, 2)
-        stock_budget       = round(configured_capital * (1 - user_crypto_pct), 2)
+        try:
+            configured_capital = self.settings.get_capital()
+        except Exception:
+            configured_capital = 5000
+
+        user_crypto_pct = self.crypto_alloc              # market hours % (e.g. 0.30)
+        ah_crypto_pct   = self.after_hours_crypto_alloc  # after hours % (e.g. 0.80)
 
         reason = []
-        if not is_hours:
-            reason.append("Market closed — crypto active 24/7")
-        else:
-            if not pdt_exempt and pdt_remaining <= 1:
+
+        if is_hours and is_trading_day:
+            # Market hours on a trading day — respect configured split
+            effective_crypto_pct = user_crypto_pct
+            reason.append(f"Market hours — {user_crypto_pct:.0%} crypto / {1-user_crypto_pct:.0%} stocks")
+            if pdt_remaining <= 1 and not pdt_exempt:
                 reason.append(f"PDT limit ({pdt_remaining} left)")
             if mins_to_close < 30:
                 reason.append(f"{mins_to_close:.0f}m to close")
-            if pnl_progress < 0.3:
-                reason.append("Behind target")
-            elif pnl_progress >= 1.0:
+            if pnl_progress >= 1.0:
                 reason.append("Target hit — protecting gains")
+        else:
+            # After hours / weekend / holiday — expand crypto budget
+            effective_crypto_pct = ah_crypto_pct
+            now = datetime.now(ET)
+            if now.weekday() >= 5:
+                reason.append(f"Weekend — crypto at {ah_crypto_pct:.0%} (24/7)")
+            elif not is_trading_day:
+                reason.append(f"Market holiday — crypto at {ah_crypto_pct:.0%} (24/7)")
+            else:
+                reason.append(f"After hours — crypto expanded {user_crypto_pct:.0%} → {ah_crypto_pct:.0%}")
+            reason.append("Stocks idle — full crypto budget active")
+
+        effective_crypto_pct = round(min(1.0, max(0.0, effective_crypto_pct)), 2)
+        crypto_budget = round(configured_capital * effective_crypto_pct, 2)
+        stock_budget  = round(configured_capital * (1 - user_crypto_pct), 2)
 
         logger.info(
-            f"Budget: crypto=${crypto_budget} ({user_crypto_pct:.0%}) "
-            f"stocks=${stock_budget} ({1-user_crypto_pct:.0%}) — "
-            f"{'; '.join(reason) or 'Base allocation'}"
+            f"Budget: crypto=${crypto_budget} ({effective_crypto_pct:.0%}) "
+            f"stocks=${stock_budget if is_hours else 0} — "
+            f"{'; '.join(reason)}"
         )
 
         decision = {
-            "crypto_pct":     round(user_crypto_pct, 2),
-            "stock_pct":      round(1 - user_crypto_pct, 2),
-            "crypto_capital": crypto_budget,
-            "stock_capital":  stock_budget,
-            "reason":         "; ".join(reason) or "Base allocation",
-            "pdt_remaining":  pdt_remaining,
-            "pdt_exempt":     pdt_exempt,
-            "market_hours":   is_hours,
-            "decided_at":     datetime.now(timezone.utc).isoformat(),
+            "crypto_pct":          effective_crypto_pct,
+            "stock_pct":           round(1 - user_crypto_pct, 2),
+            "crypto_capital":      crypto_budget,
+            "stock_capital":       stock_budget,
+            "market_hours_alloc":  user_crypto_pct,
+            "after_hours_alloc":   ah_crypto_pct,
+            "reason":              "; ".join(reason),
+            "pdt_remaining":       pdt_remaining,
+            "pdt_exempt":          pdt_exempt,
+            "market_hours":        is_hours,
+            "is_trading_day":      is_trading_day,
+            "decided_at":          datetime.now(timezone.utc).isoformat(),
         }
         self.ai_split_log.append(decision)
         if len(self.ai_split_log) > 50:
             self.ai_split_log = self.ai_split_log[-50:]
-
-        logger.info(f"AI split: crypto={user_crypto_pct:.0%} stocks={1-user_crypto_pct:.0%} — {decision['reason']}")
         return decision
 
     def init_crypto_engine(self, account: dict, split: dict) -> CryptoEngine:
@@ -152,9 +204,14 @@ class HybridEngine:
     async def run_cycle(self) -> dict:
         """One hybrid engine cycle."""
         try:
-            # Get live account
-            acct  = self.broker.get_account()
-            split = self.ai_decide_split(acct)
+            acct      = self.broker.get_account()
+            split     = self.ai_decide_split(acct)
+            is_hours  = self._is_stock_hours()
+            dtbp      = float(acct.get("daytrading_buying_power", 0))
+            has_open_crypto = (
+                self.crypto_engine is not None and
+                len(getattr(self.crypto_engine, "open_positions", {})) > 0
+            )
 
             results = {
                 "mode":     self.mode,
@@ -163,20 +220,45 @@ class HybridEngine:
                 "stocks":   None,
             }
 
-            # Crypto engine
+            # During market hours: if crypto is holding positions and dtbp=0,
+            # pause new crypto entries to free cash for stocks
+            crypto_paused = False
+            if is_hours and dtbp == 0 and has_open_crypto:
+                logger.info(
+                    "⏸  Market hours + dtbp=$0 — crypto holding positions. "
+                    "Monitoring exits only (no new crypto entries until cash frees)"
+                )
+                crypto_paused = True
+
+            # Run crypto engine
             if self.mode in ("crypto_only", "hybrid"):
                 if self.crypto_engine is None or self.crypto_engine.state == CryptoState.STOPPED:
-                    self.crypto_engine = self.init_crypto_engine(acct, split)
+                    if not (is_hours and crypto_paused):
+                        self.crypto_engine = self.init_crypto_engine(acct, split)
+                        # Apply planner's crypto budget
+                        if self.planner and self.crypto_engine:
+                            plan = self.planner.get_or_create_plan()
+                            self.crypto_engine.allocated_capital = plan.crypto_budget
+                            logger.info(
+                                f"📋 Plan: crypto=${plan.crypto_budget} "
+                                f"stocks=${plan.stock_budget} | "
+                                f"target=${plan.daily_target_min}–${plan.daily_target_max} | "
+                                f"per-trade crypto=${plan.crypto_per_trade} stocks=${plan.stock_per_trade}"
+                            )
                 else:
-                    # Always use USER's configured budget — never the dynamic AI split %
-                    configured   = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
+                    configured    = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
                     crypto_budget = round(configured * self.crypto_alloc, 2)
                     self.crypto_engine.allocated_capital = crypto_budget
                     self.crypto_engine.capital           = configured
                     self.crypto_engine.crypto_alloc      = self.crypto_alloc
                     self.crypto_engine.compounded_gains  = max(0, self.crypto_engine.compounded_gains)
 
-                results["crypto"] = await self.crypto_engine.run_cycle()
+                    if crypto_paused:
+                        # Only manage exits — don't scan for new entries
+                        await self.crypto_engine._manage_positions()
+                        results["crypto"] = self.crypto_engine.status()
+                    else:
+                        results["crypto"] = await self.crypto_engine.run_cycle()
 
             return results
 
@@ -186,6 +268,7 @@ class HybridEngine:
 
     def get_status(self) -> dict:
         crypto_status = self.crypto_engine.status() if self.crypto_engine else None
+        plan_summary  = self.planner.get_api_summary() if self.planner else None
         return {
             "mode":          self.mode,
             "crypto_alloc":  self.crypto_alloc,
@@ -193,6 +276,7 @@ class HybridEngine:
             "mins_to_close": round(self._time_to_close_min(), 1),
             "crypto":        crypto_status,
             "ai_split_log":  self.ai_split_log[-5:],
+            "day_plan":      plan_summary,
         }
 
     def set_mode(self, mode: str):

@@ -479,8 +479,9 @@ async def stop_bot(user: User = Depends(get_current_user)):
     return {"status": "stopped"}
 
 class EngineModeBody(BaseModel):
-    mode:         str   # stocks_only | crypto_only | hybrid
-    crypto_alloc: float = 0.30   # 0.0 – 1.0
+    mode:                    str   # stocks_only | crypto_only | hybrid
+    crypto_alloc:            float = 0.30   # 0.0 – 1.0 (market hours)
+    after_hours_crypto_alloc: float = 0.80  # 0.0 – 1.0 (after hours, default 80%)
 
 _hybrid_engine = None
 
@@ -828,14 +829,20 @@ async def get_trades(user: User = Depends(get_current_user), db: Session = Depen
             from datetime import date
             today_str = str(date.today())
             try:
-                from alpaca.trading.requests import GetOrdersRequest
-                from alpaca.trading.enums   import QueryOrderStatus
-                req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=50,
-                                       after=f"{today_str}T00:00:00Z")
-                raw_orders = broker.trading.get_orders(filter=req)
+                raw_orders = broker.get_open_orders() + (
+                    getattr(broker, "_filled_today", [])
+                )
+                # Get filled orders via direct API call
+                try:
+                    from alpaca.trading.requests import GetOrdersRequest
+                    from alpaca.trading.enums   import QueryOrderStatus
+                    req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=50,
+                                          after=f"{today_str}T00:00:00Z")
+                    raw_orders = broker.trading.get_orders(filter=req)
+                except Exception:
+                    raw_orders = []
             except Exception:
-                # Fallback for older alpaca-py
-                raw_orders = broker.trading.get_orders() or []
+                raw_orders = []
             db_order_ids = set()  # don't duplicate DB records
             for o in raw_orders:
                 try:
@@ -1153,11 +1160,12 @@ async def update_targets(body: TargetsBody,
 
 
 class EngineSettingsBody(BaseModel):
-    stop_new_trades_hour:   int   = 15
-    stop_new_trades_minute: int   = 30
-    max_open_positions:     int   = 3
-    engine_mode:            str   = "stocks_only"   # stocks_only | crypto_only | hybrid
-    crypto_alloc_pct:       float = 0.30
+    stop_new_trades_hour:      int   = 15
+    stop_new_trades_minute:    int   = 30
+    max_open_positions:        int   = 3
+    engine_mode:               str   = "stocks_only"
+    crypto_alloc_pct:          float = 0.30
+    after_hours_crypto_alloc_pct: float = 0.80   # 50%–100% after hours
 
 @app.put("/api/settings/engine", tags=["Settings"])
 async def update_engine_settings(
@@ -1174,6 +1182,8 @@ async def update_engine_settings(
         raise HTTPException(400, "max_open_positions must be 1–10")
     if not (0.0 <= body.crypto_alloc_pct <= 1.0):
         raise HTTPException(400, "crypto_alloc_pct must be 0.0–1.0")
+    if not (0.50 <= body.after_hours_crypto_alloc_pct <= 1.0):
+        raise HTTPException(400, "after_hours_crypto_alloc_pct must be 0.50–1.0")
 
     settings.set_engine_settings(
         body.stop_new_trades_hour,
@@ -1181,7 +1191,16 @@ async def update_engine_settings(
         body.max_open_positions,
         body.engine_mode,
         body.crypto_alloc_pct,
+        body.after_hours_crypto_alloc_pct,
     )
+
+    # Update live hybrid engine if running
+    global _hybrid_engine
+    if _hybrid_engine:
+        _hybrid_engine.crypto_alloc            = body.crypto_alloc_pct
+        _hybrid_engine.after_hours_crypto_alloc = body.after_hours_crypto_alloc_pct
+        logger.info(f"Live engine updated: market={body.crypto_alloc_pct:.0%} after-hours={body.after_hours_crypto_alloc_pct:.0%}")
+
     return {**settings.all(), "status": "engine_settings_saved"}
 
 @app.get("/api/watchlist",              tags=["Watchlist"])
@@ -1396,6 +1415,25 @@ async def live_activity(user: User = Depends(get_current_user)):
 # Regime, VWAP, Setup Classifier
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/api/day-plan", tags=["Strategy"])
+async def get_day_plan(user: User = Depends(get_current_user)):
+    """Get today's smart capital allocation plan."""
+    global _hybrid_engine
+    if _hybrid_engine and _hybrid_engine.planner:
+        return _hybrid_engine.planner.get_api_summary()
+    # Build a standalone plan if hybrid engine not running
+    try:
+        from strategy.capital_planner import CapitalPlanner
+        broker  = bot_loop.broker
+        if not broker:
+            raise HTTPException(400, "Start the bot first")
+        planner = CapitalPlanner(settings, broker,
+                                  getattr(user, "crypto_alloc", 0.30))
+        return planner.get_api_summary()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.get("/api/regime", tags=["Analysis"])
 async def get_regime(user: User = Depends(get_current_user)):
     """Get current market regime based on SPY analysis."""
@@ -1404,12 +1442,31 @@ async def get_regime(user: User = Depends(get_current_user)):
     try:
         from data.regime_detector import RegimeDetector
         from data.indicators       import add_all_indicators
+        import numpy as np
         df = bot_loop.broker.get_bars("SPY", "5Min", 100)
         if df.empty:
             raise HTTPException(400, "No SPY data available")
         df = add_all_indicators(df)
         detector = RegimeDetector()
-        return detector.detect(df)
+        result   = detector.detect(df)
+
+        # Sanitize numpy types recursively
+        def _clean(obj):
+            if isinstance(obj, dict):
+                return {k: _clean(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_clean(v) for v in obj]
+            if isinstance(obj, (np.bool_, np.bool8 if hasattr(np, 'bool8') else np.bool_)):
+                return bool(obj)
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+
+        return _clean(result)
     except Exception as e:
         raise HTTPException(500, str(e))
 

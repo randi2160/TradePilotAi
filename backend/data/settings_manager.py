@@ -136,22 +136,28 @@ class SettingsManager:
 
     def all(self) -> dict:
         return {
-            "capital":               self.get_capital(),
+            "capital":                    self.get_capital(),
             **self.get_targets(),
-            "watchlist":             self.get_watchlist(),
-            "stop_new_trades_hour":  self._data.get("stop_new_trades_hour",  config.STOP_NEW_TRADES_HOUR),
-            "stop_new_trades_minute":self._data.get("stop_new_trades_minute", config.STOP_NEW_TRADES_MINUTE),
-            "max_open_positions":    self._data.get("max_open_positions",     config.MAX_OPEN_POSITIONS),
-            "engine_mode":           self._data.get("engine_mode",            "stocks_only"),
-            "crypto_alloc_pct":      self._data.get("crypto_alloc_pct",       0.30),
-            "updated_at":            self._data.get("updated_at", ""),
+            "watchlist":                  self.get_watchlist(),
+            "stop_new_trades_hour":       self._data.get("stop_new_trades_hour",  config.STOP_NEW_TRADES_HOUR),
+            "stop_new_trades_minute":     self._data.get("stop_new_trades_minute", config.STOP_NEW_TRADES_MINUTE),
+            "max_open_positions":         self._data.get("max_open_positions",     config.MAX_OPEN_POSITIONS),
+            "engine_mode":                self._data.get("engine_mode",            "stocks_only"),
+            "crypto_alloc_pct":           self._data.get("crypto_alloc_pct",       0.30),
+            "after_hours_crypto_alloc_pct": self._data.get("after_hours_crypto_alloc_pct", 0.80),
+            "updated_at":                 self._data.get("updated_at", ""),
         }
 
     def set_engine_settings(self, stop_hour: int, stop_minute: int, max_positions: int,
-                             engine_mode: str, crypto_alloc: float):
-        self._data["stop_new_trades_hour"]   = stop_hour
-        self._data["stop_new_trades_minute"] = stop_minute
-        self._data["max_open_positions"]     = max_positions
-        self._data["engine_mode"]            = engine_mode
-        self._data["crypto_alloc_pct"]       = round(crypto_alloc, 2)
+                             engine_mode: str, crypto_alloc: float,
+                             after_hours_crypto_alloc: float = 0.80):
+        self._data["stop_new_trades_hour"]        = stop_hour
+        self._data["stop_new_trades_minute"]      = stop_minute
+        self._data["max_open_positions"]          = max_positions
+        self._data["engine_mode"]                 = engine_mode
+        self._data["crypto_alloc_pct"]            = round(crypto_alloc, 2)
+        self._data["after_hours_crypto_alloc_pct"] = round(min(1.0, max(0.50, after_hours_crypto_alloc)), 2)
         self._save()
+
+    def get_after_hours_crypto_alloc(self) -> float:
+        return float(self._data.get("after_hours_crypto_alloc_pct", 0.80))

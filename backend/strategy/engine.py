@@ -117,17 +117,20 @@ class StrategyEngine:
             return
 
         # ── Pre-flight buying power check — skip if insufficient cash ─────────
+        # ── Pre-flight buying power check — skip if Alpaca will reject ──────────
         try:
             acct       = self.broker.get_account()
-            nmbp       = float(acct.get("non_marginable_buying_power", 0))
             dtbp       = float(acct.get("daytrading_buying_power", 0))
             order_cost = sizing["qty"] * price
-            effective_bp = nmbp if nmbp > 50 else dtbp
-            if effective_bp < order_cost * 1.05:
+            if dtbp == 0:
                 logger.warning(
-                    f"⚠️  Skipping {symbol} — insufficient BP: "
-                    f"need ${order_cost:.0f}, have ${effective_bp:.0f} "
-                    f"(nmbp=${nmbp:.0f} dtbp=${dtbp:.0f})"
+                    f"⚠️  Skipping {symbol} — Alpaca daytrading_buying_power=$0 "
+                    f"(crypto positions holding cash). Retrying when crypto exits."
+                )
+                return
+            if dtbp < order_cost:
+                logger.warning(
+                    f"⚠️  Skipping {symbol} — dtbp=${dtbp:.0f} < cost=${order_cost:.0f}"
                 )
                 return
         except Exception as e:
