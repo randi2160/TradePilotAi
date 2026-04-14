@@ -194,11 +194,18 @@ class HybridEngine:
             max_daily_loss    = targets["loss"],
             capital           = configured_capital,
             crypto_alloc      = split["crypto_pct"],
-            min_scalp_profit  = 5,    # $5 min per scalp — realistic for small budget
+            min_scalp_profit  = 5,
             compound_mode     = True,
-            min_probability   = 0.55,  # raised — filter 31-40% confidence losers
+            min_probability   = 0.55,
             max_positions     = 2,
         )
+        # Apply user-configured milestones
+        try:
+            milestones = self.settings.get_profit_milestones()
+            engine.set_milestones(milestones)
+            logger.info(f"Milestones loaded: {[m['threshold'] for m in milestones]}")
+        except Exception as e:
+            logger.warning(f"Milestone load: {e}")
         return engine
 
     async def run_cycle(self) -> dict:

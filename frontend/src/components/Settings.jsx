@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { getSettings, updateCapital, updateTargets, addSymbol, removeSymbol, setWatchlist } from '../services/api'
+import MilestoneSettings from './MilestoneSettings'
 import { Plus, X, Save, DollarSign, Target, List } from 'lucide-react'
 
 function InputField({ label, value, onChange, prefix='$', min, max, step=1, help }) {
@@ -360,6 +361,11 @@ export default function Settings() {
           className="w-full flex items-center justify-center gap-2 bg-brand-500 hover:bg-brand-600 text-dark-900 font-bold px-4 py-3 rounded-xl disabled:opacity-50 transition-colors">
           {saving === 'engine' ? '⏳ Saving…' : '⚡ Save Engine Settings'}
         </button>
+      </div>
+
+      {/* ── Profit Milestones ─────────────────────────────────────────────────── */}
+      <div className="bg-dark-800 border border-dark-600 rounded-xl p-5">
+        <MilestoneSettings />
       </div>
 
       {/* ── Watchlist Manager ────────────────────────────────────────────────── */}

@@ -161,3 +161,39 @@ class SettingsManager:
 
     def get_after_hours_crypto_alloc(self) -> float:
         return float(self._data.get("after_hours_crypto_alloc_pct", 0.80))
+
+    def get_profit_milestones(self) -> list:
+        """
+        Returns list of milestone dicts:
+        [{threshold, floor_pct, size_pct, label}, ...]
+        Sorted descending by threshold (highest first).
+        """
+        default = [
+            {"threshold": 400, "floor_pct": 0.953, "size_pct": 0.00, "label": "🏆 $400 — Exits only"},
+            {"threshold": 300, "floor_pct": 0.950, "size_pct": 0.40, "label": "🥇 $300 — 40% size"},
+            {"threshold": 200, "floor_pct": 0.950, "size_pct": 0.50, "label": "🥈 $200 — 50% size"},
+            {"threshold": 150, "floor_pct": 0.953, "size_pct": 0.60, "label": "🥉 $150 — 60% size"},
+            {"threshold": 100, "floor_pct": 0.950, "size_pct": 0.75, "label": "✅ $100 — 75% size"},
+        ]
+        saved = self._data.get("profit_milestones", None)
+        if saved and isinstance(saved, list) and len(saved) >= 2:
+            return sorted(saved, key=lambda x: x["threshold"], reverse=True)
+        return default
+
+    def set_profit_milestones(self, milestones: list):
+        """Save user-configured milestones."""
+        # Validate each milestone
+        validated = []
+        for m in milestones:
+            try:
+                validated.append({
+                    "threshold": float(m["threshold"]),
+                    "floor_pct": float(m.get("floor_pct", 0.95)),
+                    "size_pct":  float(m.get("size_pct", 0.5)),
+                    "label":     str(m.get("label", f"${m['threshold']}")),
+                })
+            except Exception:
+                continue
+        if validated:
+            self._data["profit_milestones"] = sorted(validated, key=lambda x: x["threshold"], reverse=True)
+            self._save()

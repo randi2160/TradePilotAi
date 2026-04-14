@@ -191,6 +191,24 @@ class CryptoEngine:
         self._user_id           = 1
         self._reporter          = None
 
+        # Milestone profit protection
+        self.milestone_size_pct = 1.0   # starts at 100%, reduces as milestones hit
+        self.milestone_label    = ""    # current milestone label for UI
+        # Default milestones — overridden by set_milestones() from settings
+        self._milestones = [
+            {"threshold": 400, "floor_pct": 0.953, "size_pct": 0.00, "label": "🏆 $400 — Exits only"},
+            {"threshold": 300, "floor_pct": 0.950, "size_pct": 0.40, "label": "🥇 $300 — 40% size"},
+            {"threshold": 200, "floor_pct": 0.950, "size_pct": 0.50, "label": "🥈 $200 — 50% size"},
+            {"threshold": 150, "floor_pct": 0.953, "size_pct": 0.60, "label": "🥉 $150 — 60% size"},
+            {"threshold": 100, "floor_pct": 0.950, "size_pct": 0.75, "label": "✅ $100 — 75% size"},
+        ]
+
+    def set_milestones(self, milestones: list):
+        """Update milestones from user settings."""
+        if milestones:
+            self._milestones = sorted(milestones, key=lambda x: x["threshold"], reverse=True)
+            logger.info(f"Milestones configured: {[m['threshold'] for m in self._milestones]}")
+
         # ── Self-learning: track per-coin performance ─────────────────────
         # {ticker: {wins, losses, total_pnl, last_loss_time, skip_until}}
         self.coin_stats: Dict[str, dict] = {}
@@ -259,34 +277,75 @@ class CryptoEngine:
 
     def check_profit_lock(self):
         """
-        Trailing Profit Lock — keeps trading as long as market is good,
-        but never gives back more than trail_pct of peak gains.
+        Milestone-Based Profit Protection System.
 
-        How it works:
-        - Once min target hit: lock floor at 97% of min target
-        - As P&L grows BEYOND target: floor trails at 94% of peak
-        - If P&L drops to floor → stop and protect all gains above floor
-        - Never stop just because target is hit — only stop on drawdown
+        Milestones:  $100 → $150 → $200 → $300 → $400
+        At each milestone:
+          1. Set a hard floor (95% of milestone) — never give back more than 5%
+          2. Reduce position size for new trades
+          3. Keep trading but with smaller size
+          4. If P&L drops below floor → close everything, lock profit, done
+
+        Size reduction schedule:
+          $0–$100:  normal size (100%)
+          $100+:    75% size
+          $150+:    60% size
+          $200+:    50% size
+          $300+:    40% size
+          $400+:    STOP new entries (only manage open positions)
         """
         pnl = self.realized_pnl
 
-        # First lock: hit minimum target
-        if pnl >= self.target_min and self.locked_floor is None:
-            self.locked_floor = round(self.target_min * 0.97, 2)   # 3% buffer
-            logger.info(f"🔒 Profit lock activated at floor ${self.locked_floor:.2f} (hit min ${self.target_min})")
+        # Use user-configured milestones (set via UI, defaulting to built-in thresholds)
+        for m in self._milestones:
+            threshold = m["threshold"]
+            floor_pct = m.get("floor_pct", 0.95)
+            size_pct  = m.get("size_pct", 0.5)
+            label     = m.get("label", f"${threshold} milestone")
+            if pnl >= threshold:
+                new_floor = round(threshold * floor_pct, 2)
 
-        # Trailing: continuously raise floor as P&L grows
-        if self.locked_floor is not None and pnl > self.target_min:
-            # Trail at 94% of current peak — tightens as we earn more
-            trail_pct = 0.94 if pnl < self.target_desired * 1.5 else 0.96
-            candidate_floor = round(pnl * trail_pct, 2)
-            if candidate_floor > self.locked_floor:
-                old_floor = self.locked_floor
-                self.locked_floor = candidate_floor
-                logger.info(
-                    f"🔒 Floor raised: ${old_floor:.2f} → ${self.locked_floor:.2f} "
-                    f"(P&L ${pnl:.2f}, protecting {trail_pct:.0%} of gains)"
-                )
+                # Announce milestone if newly hit
+                if self.locked_floor is None or new_floor > self.locked_floor:
+                    old_floor = self.locked_floor or 0
+                    self.locked_floor      = new_floor
+                    self.milestone_size_pct = size_pct
+                    self.milestone_label   = label
+
+                    logger.info(
+                        f"\n{'='*55}\n"
+                        f"🎯 MILESTONE HIT: {label}\n"
+                        f"   P&L: ${pnl:.2f} | Floor: ${new_floor:.2f} | "
+                        f"Size: {size_pct:.0%}\n"
+                        f"   Previous floor: ${old_floor:.2f}\n"
+                        f"{'='*55}"
+                    )
+
+                    # Notify activity feed
+                    _rep = getattr(self, '_reporter', None)
+                    if _rep:
+                        _rep.log("milestone", "PORTFOLIO",
+                                 f"🎯 {label} — floor=${new_floor} size={size_pct:.0%}",
+                                 {"pnl": pnl, "floor": new_floor, "size_pct": size_pct})
+                break  # Only apply highest milestone
+
+        # Trailing floor: also raise floor if P&L grows ABOVE current milestone
+        # (continuous trailing between milestones)
+        if self.locked_floor is not None and pnl > (self.locked_floor / 0.95):
+            # Trail at 95% continuously
+            candidate = round(pnl * 0.95, 2)
+            if candidate > self.locked_floor:
+                old = self.locked_floor
+                self.locked_floor = candidate
+                logger.info(f"🔒 Trailing floor raised: ${old:.2f} → ${self.locked_floor:.2f} (P&L ${pnl:.2f})")
+
+    def get_size_multiplier(self) -> float:
+        """Returns position size multiplier based on current milestone."""
+        return getattr(self, 'milestone_size_pct', 1.0)
+
+    def is_exits_only_mode(self) -> bool:
+        """True when we've hit the top milestone and should only manage exits."""
+        return getattr(self, 'milestone_size_pct', 1.0) == 0.0
 
     # ── Self-learning: per-coin performance tracking ──────────────────────────
 
@@ -504,8 +563,11 @@ class CryptoEngine:
         if price - stop < 0.01:
             stop = round(price - 0.01, 6)
 
-        # Use up to 40% of available cash per trade
-        max_spend = available * 0.40
+        # Use up to 40% of available cash per trade, reduced by milestone multiplier
+        size_mult = self.get_size_multiplier()
+        max_spend = available * 0.40 * size_mult
+        if size_mult < 1.0:
+            logger.info(f"  📉 Milestone size reduction: {size_mult:.0%} of normal")
         bp_units  = max_spend / price if price > 0 else 0
 
         # Risk-based: max 0.5% of configured capital
@@ -577,10 +639,18 @@ class CryptoEngine:
         if len(self.open_positions) >= self.max_positions:
             return self.status()
 
-        # Update profit lock
+        # Update profit lock and check milestones
         self.check_profit_lock()
-        if self.locked_floor is not None:
-            self.state = EngineState.LOCKED_PROFIT
+        self.state = EngineState.LOCKED_PROFIT if self.locked_floor else self.state
+
+        # EXITS ONLY MODE — hit top milestone, protect all gains
+        if self.is_exits_only_mode():
+            logger.info(
+                f"🏆 EXITS ONLY — P&L ${self.realized_pnl:.2f} above top milestone. "
+                f"Managing {len(self.open_positions)} open positions, no new entries."
+            )
+            await self._manage_positions()
+            return self.status()
 
         # Scan and score
         self.state    = EngineState.SCANNING
@@ -1103,6 +1173,9 @@ class CryptoEngine:
             "realized_pnl":      _safe_round(self.realized_pnl),
             "compounded_gains":  _safe_round(self.compounded_gains),
             "locked_floor":      _safe_round(self.locked_floor) if self.locked_floor else None,
+            "milestone_size_pct": self.milestone_size_pct,
+            "milestone_label":   self.milestone_label,
+            "exits_only_mode":   self.is_exits_only_mode(),
             "remaining_to_min":  _safe_round(self.remaining_to_min()),
             "remaining_to_desired": _safe_round(self.remaining_to_desired()),
             "open_positions":    len(self.open_positions),

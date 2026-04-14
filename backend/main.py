@@ -1530,6 +1530,28 @@ async def live_activity(user: User = Depends(get_current_user)):
 # Regime, VWAP, Setup Classifier
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/api/milestones", tags=["Strategy"])
+async def get_milestones(user: User = Depends(get_current_user)):
+    """Get user's profit milestone configuration."""
+    return {"milestones": settings.get_profit_milestones()}
+
+@app.put("/api/milestones", tags=["Strategy"])
+async def set_milestones(
+    body: dict,
+    user: User = Depends(get_current_user),
+):
+    """Save user-configured profit milestones."""
+    milestones = body.get("milestones", [])
+    if not milestones or len(milestones) < 1:
+        raise HTTPException(400, "At least 1 milestone required")
+    settings.set_profit_milestones(milestones)
+    # Apply to running engine immediately
+    global _hybrid_engine
+    if _hybrid_engine and _hybrid_engine.crypto_engine:
+        _hybrid_engine.crypto_engine.set_milestones(settings.get_profit_milestones())
+    return {"milestones": settings.get_profit_milestones(), "status": "saved"}
+
+
 @app.get("/api/day-plan", tags=["Strategy"])
 async def get_day_plan(user: User = Depends(get_current_user)):
     """Get today's smart capital allocation plan."""
