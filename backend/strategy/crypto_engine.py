@@ -21,6 +21,7 @@ from typing     import Optional, List, Dict
 logger = logging.getLogger(__name__)
 
 # Full scan universe — used for momentum discovery (yfinance, not traded)
+# Full universe — scanned via Binance every cycle
 CRYPTO_UNIVERSE = [
     "BTC", "ETH", "SOL", "DOGE", "LINK", "AAVE",
     "LTC", "BCH", "AVAX", "XRP", "ADA", "DOT",
@@ -29,55 +30,19 @@ CRYPTO_UNIVERSE = [
     "SHIB", "FIL",
 ]
 
-# Alpaca paper trading ONLY supports these crypto symbols — do NOT trade others
+# Alpaca paper trading ONLY supports these crypto symbols
 ALPACA_TRADEABLE = {
     "BTC", "ETH", "LTC", "BCH", "DOGE",
     "LINK", "AAVE", "SOL", "XRP", "SHIB",
 }
 
-
-def batch_fetch_crypto_bars(tickers: list, interval: str = "1m", period: str = "1d") -> dict:
-    """
-    Fetch bars for ALL tickers in ONE yfinance call to avoid data mixing.
-    Returns {ticker: DataFrame} with correct prices for each symbol.
-    """
-    import yfinance as yf
-    import pandas as pd
-
-    yf_syms = [f"{t}-USD" for t in tickers]
-    result  = {}
-    try:
-        df = yf.download(
-            yf_syms, period=period, interval=interval,
-            progress=False, auto_adjust=True, group_by="ticker",
-        )
-        if df is None or df.empty:
-            return {}
-
-        for ticker in tickers:
-            yf_sym = f"{ticker}-USD"
-            try:
-                if isinstance(df.columns, pd.MultiIndex):
-                    lvl0 = df.columns.get_level_values(0)
-                    if yf_sym in lvl0:
-                        sub = df[yf_sym].copy()
-                    else:
-                        continue
-                else:
-                    sub = df.copy()
-
-                sub.columns = [c.lower() for c in sub.columns]
-                cols = [c for c in ["open","high","low","close","volume"] if c in sub.columns]
-                if len(cols) < 4:
-                    continue
-                sub = sub[cols].dropna()
-                if len(sub) >= 5:
-                    result[ticker] = sub
-            except Exception:
-                continue
-    except Exception as e:
-        logger.warning(f"Batch yfinance download: {e}")
-    return result
+# Import Binance scanner (fast, free, no auth)
+try:
+    from data.binance_scanner import scan_all_coins as _binance_scan, get_live_price as _binance_price
+    BINANCE_AVAILABLE = True
+except ImportError:
+    BINANCE_AVAILABLE = False
+    logger.warning("Binance scanner not available — falling back to yfinance")
 
 
 class EngineState(Enum):
@@ -205,7 +170,7 @@ class CryptoEngine:
         # State
         self.state              = EngineState.IDLE
         self.realized_pnl       = 0.0
-        self.locked_floor       = None       # set once min target hit
+        self.locked_floor       = None
         self.open_positions: Dict[str, CryptoPosition] = {}
         self.compounded_gains   = 0.0
         self.stop_reason        = None
@@ -214,9 +179,23 @@ class CryptoEngine:
         self.cycle_count        = 0
         self.last_refresh       = 0
         self.trades_today       = 0
-        self._scan_results      = []   # last scan scores for UI display
-        self._user_id           = 1    # default — set by caller via engine._user_id = user.id
-        self._reporter          = None # set by caller via engine._reporter = reporter
+        self._scan_results      = []
+        self._user_id           = 1
+        self._reporter          = None
+
+        # ── Self-learning: track per-coin performance ─────────────────────
+        # {ticker: {wins, losses, total_pnl, last_loss_time, skip_until}}
+        self.coin_stats: Dict[str, dict] = {}
+        self.consecutive_losses  = 0   # global loss streak
+        self.last_trade_was_loss = False
+
+        # Coins that are structurally bad for scalping (too cheap = spread kills profit)
+        # Price threshold: skip coins under $1.00 — spread too large relative to move
+        self.MIN_COIN_PRICE = 1.00
+
+        # Skip DOGE/XRP for scalping — price too low, spread eats all profit
+        # User can override in settings but these are bad actors from the data
+        self.SKIP_FOR_SCALPING = {"DOGE", "SHIB"}  # penny coins — spread = loss
 
     # ── Account state ─────────────────────────────────────────────────────────
 
@@ -300,6 +279,82 @@ class CryptoEngine:
                     f"🔒 Floor raised: ${old_floor:.2f} → ${self.locked_floor:.2f} "
                     f"(P&L ${pnl:.2f}, protecting {trail_pct:.0%} of gains)"
                 )
+
+    # ── Self-learning: per-coin performance tracking ──────────────────────────
+
+    def _update_coin_stats(self, ticker: str, pnl: float):
+        """Record trade result and learn from it."""
+        import time
+        if ticker not in self.coin_stats:
+            self.coin_stats[ticker] = {
+                "wins": 0, "losses": 0, "total_pnl": 0.0,
+                "loss_streak": 0, "skip_until": 0,
+            }
+        s = self.coin_stats[ticker]
+        s["total_pnl"] += pnl
+        if pnl > 0:
+            s["wins"]        += 1
+            s["loss_streak"]  = 0
+            self.consecutive_losses  = 0
+            self.last_trade_was_loss = False
+        else:
+            s["losses"]      += 1
+            s["loss_streak"] += 1
+            self.consecutive_losses  += 1
+            self.last_trade_was_loss  = True
+
+            # Cooldown after consecutive losses on same coin
+            if s["loss_streak"] >= 2:
+                # 10 min cooldown per extra loss, max 60 min
+                cooldown_min = min(60, s["loss_streak"] * 10)
+                s["skip_until"] = time.time() + cooldown_min * 60
+                logger.info(
+                    f"🧠 Learning: {ticker} on {s['loss_streak']}-loss streak — "
+                    f"cooling down {cooldown_min}min"
+                )
+
+        total = s["wins"] + s["losses"]
+        win_rate = s["wins"] / total * 100 if total > 0 else 0
+        logger.info(
+            f"🧠 {ticker} stats: {s['wins']}W/{s['losses']}L "
+            f"({win_rate:.0f}% WR) | streak={s['loss_streak']} | "
+            f"pnl=${s['total_pnl']:+.2f}"
+        )
+
+    def _should_skip_coin(self, ticker: str, price: float) -> tuple:
+        """
+        Returns (skip: bool, reason: str).
+        Filters out coins that are structurally bad or on cooldown.
+        """
+        import time
+
+        # Skip penny coins — spread eats profit
+        if ticker in self.SKIP_FOR_SCALPING:
+            return True, f"{ticker} skipped — penny coin, spread kills profit"
+
+        # Skip coins below price threshold
+        if price < self.MIN_COIN_PRICE:
+            return True, f"{ticker} @ ${price:.4f} too cheap — spread risk"
+
+        # Skip BTC with tiny position — fees dominate
+        if ticker == "BTC" and self.allocated_capital * 0.40 / price < 0.005:
+            return True, f"BTC position too small for capital — skip"
+
+        # Check cooldown from consecutive losses
+        s = self.coin_stats.get(ticker, {})
+        skip_until = s.get("skip_until", 0)
+        if time.time() < skip_until:
+            remaining = int((skip_until - time.time()) / 60)
+            return True, f"{ticker} cooling down — {remaining}min left after loss streak"
+
+        # Check overall win rate — if < 30% after 5+ trades, reduce to low priority
+        total = s.get("wins", 0) + s.get("losses", 0)
+        if total >= 5:
+            wr = s.get("wins", 0) / total
+            if wr < 0.30:
+                return True, f"{ticker} win rate {wr:.0%} too low — skipping today"
+
+        return False, ""
 
     def should_stop(self) -> Optional[str]:
         """Check all stop conditions."""
@@ -552,28 +607,48 @@ class CryptoEngine:
             self.state = EngineState.POSITION_OPEN
             return self.status()
 
-        # Valid = meets probability threshold
-        valid_tradeable = [c for c in tradeable if c.get("valid")]
+        # ── Self-learning filter: skip bad coins and penny coins ──────────
+        filtered = []
+        for c in tradeable:
+            skip, reason = self._should_skip_coin(c.get("ticker",""), c.get("price", 0))
+            if skip:
+                logger.info(f"  🚫 {c.get('ticker')}: {reason}")
+            else:
+                filtered.append(c)
+        tradeable = filtered if filtered else tradeable  # fallback if all filtered
+
+        # ── Global loss streak guard ──────────────────────────────────────
+        # After 3 consecutive losses, tighten confidence requirement
+        min_conf = self.min_probability
+        if self.consecutive_losses >= 5:
+            logger.info(f"⚠️  {self.consecutive_losses} consecutive losses — pausing 10 min")
+            import time; time.sleep(600)
+            self.consecutive_losses = 0
+        elif self.consecutive_losses >= 3:
+            min_conf = max(self.min_probability, 0.58)  # raise bar after 3 losses
+            logger.info(f"⚠️  {self.consecutive_losses} losses in a row — raising confidence to {min_conf:.0%}")
+
+        # Valid = meets confidence threshold (raised after loss streaks)
+        valid_tradeable = [c for c in tradeable if c.get("valid") and
+                          c.get("probability", c.get("confidence", 0) / 100) >= min_conf]
 
         if not valid_tradeable:
-            # No coin meets strict threshold — pick best tradeable by score
-            # (market may be quiet — don't sit idle forever)
-            best_available = sorted(tradeable, key=lambda x: x["score"], reverse=True)[0]
-            if best_available.get("score", 0) >= 25:
-                logger.info(
-                    f"🎯 No coin meets threshold — trading best available: "
-                    f"{best_available.get('ticker')} score={best_available.get('score',0):.0f} "
-                    f"(quiet market mode)"
-                )
-                valid_tradeable = [best_available]
-            else:
-                # Best tradeable score < 25 — truly no opportunity right now
-                non_tradeable_best = candidates[0] if candidates else None
-                if non_tradeable_best:
+            # Only pick fallback if confidence streak is clean
+            if self.consecutive_losses < 2:
+                best_available = sorted(tradeable, key=lambda x: x["score"], reverse=True)[0]
+                # Raise the fallback score bar too — don't trade noise
+                if best_available.get("score", 0) >= 40:
                     logger.info(
-                        f"Market quiet — best is {non_tradeable_best.get('ticker')} "
-                        f"score={non_tradeable_best.get('score',0):.0f} (not tradeable on Alpaca paper)"
+                        f"🎯 No coin meets threshold — trading best available: "
+                        f"{best_available.get('ticker')} score={best_available.get('score',0):.0f}"
                     )
+                    valid_tradeable = [best_available]
+                else:
+                    logger.info("Market quiet — no quality setup, sitting out")
+                    self.state = EngineState.IDLE
+                    return self.status()
+            else:
+                logger.info(f"Loss streak {self.consecutive_losses} — waiting for high-quality setup only")
                 self.state = EngineState.IDLE
                 return self.status()
 
@@ -686,28 +761,93 @@ class CryptoEngine:
     async def _scan_candidates(self) -> List[dict]:
         import asyncio
 
-        loop = asyncio.get_event_loop()
-        t0   = loop.time()
+        loop    = asyncio.get_event_loop()
+        t0      = loop.time()
 
-        # ONE batch yfinance call for ALL 25 coins — avoids price mixing between threads
-        bars_map = await loop.run_in_executor(
-            None, batch_fetch_crypto_bars, CRYPTO_UNIVERSE, "1m", "1d"
-        )
-        elapsed = loop.time() - t0
-        logger.info(f"🤖 Batch fetched {len(bars_map)}/{len(CRYPTO_UNIVERSE)} coins in {elapsed:.1f}s")
+        if BINANCE_AVAILABLE:
+            # Binance: ~200-400ms, real-time prices, no auth needed
+            results  = await loop.run_in_executor(None, _binance_scan, CRYPTO_UNIVERSE)
+            elapsed  = loop.time() - t0
+            logger.info(f"🤖 Binance scan: {len(results)}/{len(CRYPTO_UNIVERSE)} coins in {elapsed:.1f}s")
 
-        # Score each coin and rank by AI
-        candidates = []
-        for ticker, bars in bars_map.items():
-            try:
-                symbol = f"{ticker}/USD"
-                price  = float(bars["close"].iloc[-1])
-                scored = self.score_crypto_candidate(symbol, bars)
-                scored["ticker"] = ticker
-                scored["price"]  = price
-                candidates.append(scored)
-            except Exception as e:
-                logger.debug(f"  Score {ticker}: {e}")
+            # Convert Binance results to engine candidate format
+            candidates = []
+            for r in results:
+                try:
+                    ticker = r["ticker"]
+                    price  = r["price"]
+                    # Build a minimal bars-compatible scored dict
+                    # using score_crypto_candidate style output from Binance
+                    scored = {
+                        "symbol":      f"{ticker}/USD",
+                        "ticker":      ticker,
+                        "price":       price,
+                        "score":       r.get("score", 0),
+                        "probability": r.get("confidence", 50) / 100,
+                        "momentum":    r.get("momentum", 0),
+                        "vol_ratio":   r.get("vol_spike", 1),
+                        "atr":         r.get("atr", price * 0.005),
+                        "atr_pct":     r.get("atr", price * 0.005) / price * 100 if price > 0 else 0,
+                        "trend_up":    r.get("momentum", 0) > 0,
+                        "expected_move": r.get("atr", price * 0.005) * 1.5,
+                        "exp_profit":  0.25,
+                        "valid":       r.get("confidence", 0) >= self.min_probability * 100,
+                        "entry":       r.get("entry", price),
+                        "exit_target": r.get("exit_target", price),
+                        "stop":        r.get("stop", price),
+                        "change_24h":  r.get("change_24h", 0),
+                        "source":      "binance",
+                    }
+                    candidates.append(scored)
+                except Exception as e:
+                    logger.debug(f"Binance result parse {r.get('ticker','?')}: {e}")
+
+        else:
+            # Fallback: yfinance batch (slower but no external dependency)
+            import yfinance as yf
+            import pandas as pd
+            import numpy as np
+
+            def _yf_batch():
+                yf_syms = [f"{t}-USD" for t in CRYPTO_UNIVERSE]
+                try:
+                    df = yf.download(yf_syms, period="1d", interval="1m",
+                                     progress=False, auto_adjust=True, group_by="ticker")
+                    result = {}
+                    for ticker in CRYPTO_UNIVERSE:
+                        yf_sym = f"{ticker}-USD"
+                        try:
+                            if isinstance(df.columns, pd.MultiIndex):
+                                if yf_sym not in df.columns.get_level_values(0):
+                                    continue
+                                sub = df[yf_sym].copy()
+                            else:
+                                sub = df.copy()
+                            sub.columns = [c.lower() for c in sub.columns]
+                            if "close" in sub.columns and len(sub) >= 5:
+                                result[ticker] = sub
+                        except Exception:
+                            continue
+                    return result
+                except Exception as e:
+                    logger.warning(f"yfinance fallback: {e}")
+                    return {}
+
+            bars_map = await loop.run_in_executor(None, _yf_batch)
+            elapsed  = loop.time() - t0
+            logger.info(f"🤖 yfinance fallback: {len(bars_map)}/{len(CRYPTO_UNIVERSE)} coins in {elapsed:.1f}s")
+
+            candidates = []
+            for ticker, bars in bars_map.items():
+                try:
+                    symbol = f"{ticker}/USD"
+                    price  = float(bars["close"].iloc[-1])
+                    scored = self.score_crypto_candidate(symbol, bars)
+                    scored["ticker"] = ticker
+                    scored["price"]  = price
+                    candidates.append(scored)
+                except Exception as e:
+                    logger.debug(f"  Score {ticker}: {e}")
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
@@ -748,10 +888,15 @@ class CryptoEngine:
         for sym, pos in list(self.open_positions.items()):
             ticker = sym.split("/")[0]
             try:
-                if hasattr(self.broker, "get_latest_crypto_price"):
-                    current_price = self.broker.get_latest_crypto_price(ticker)
-                else:
-                    current_price = self.broker.get_latest_price(ticker)
+                # Priority: Binance (fastest) → Alpaca quote → yfinance
+                current_price = 0.0
+                if BINANCE_AVAILABLE:
+                    current_price = _binance_price(ticker)
+                if current_price <= 0:
+                    if hasattr(self.broker, "get_latest_crypto_price"):
+                        current_price = self.broker.get_latest_crypto_price(ticker)
+                    else:
+                        current_price = self.broker.get_latest_price(ticker)
                 if current_price <= 0:
                     continue
 
@@ -831,6 +976,9 @@ class CryptoEngine:
 
             if self.compound_mode and pnl > 0:
                 self.compounded_gains += pnl
+
+            # ── Self-learning: record result for this coin ────────────────
+            self._update_coin_stats(ticker, pnl)
 
             del self.open_positions[sym]
             self.state = EngineState.READY_FOR_REENTRY

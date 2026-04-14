@@ -196,7 +196,7 @@ class HybridEngine:
             crypto_alloc      = split["crypto_pct"],
             min_scalp_profit  = 5,    # $5 min per scalp — realistic for small budget
             compound_mode     = True,
-            min_probability   = 0.40, # lowered threshold — matches crypto_engine default
+            min_probability   = 0.55,  # raised — filter 31-40% confidence losers
             max_positions     = 2,
         )
         return engine
