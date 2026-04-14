@@ -1294,6 +1294,121 @@ async def record_day(user: User = Depends(get_current_user), db: Session = Depen
 # Daily Report & Activity
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/api/report/history", tags=["Reports"])
+async def pnl_history(
+    period: str   = "30d",   # 7d | 30d | 90d | all
+    user:   User  = Depends(get_current_user),
+    db:     Session = Depends(get_db),
+):
+    """
+    Daily P&L history with compound running total.
+    Returns list of days with trades, cumulative P&L, and per-trade breakdown.
+    """
+    from database.models import Trade
+    from datetime import date, timedelta
+    import math
+
+    # Determine date range
+    today = date.today()
+    if period == "7d":
+        since = today - timedelta(days=7)
+    elif period == "30d":
+        since = today - timedelta(days=30)
+    elif period == "90d":
+        since = today - timedelta(days=90)
+    else:
+        since = date(2020, 1, 1)  # all time
+
+    trades = db.query(Trade).filter(
+        Trade.user_id    == user.id,
+        Trade.status     == "closed",
+        Trade.trade_date >= str(since),
+        Trade.pnl        != None,
+    ).order_by(Trade.trade_date, Trade.closed_at).all()
+
+    # Group by date
+    from collections import defaultdict
+    by_date = defaultdict(list)
+    for t in trades:
+        by_date[t.trade_date].append(t)
+
+    # Build daily summary with running compound total
+    days = []
+    running_total = 0.0
+
+    # Get all-time total before the window for accurate compound start
+    prior_trades = db.query(Trade).filter(
+        Trade.user_id   == user.id,
+        Trade.status    == "closed",
+        Trade.trade_date < str(since),
+        Trade.pnl       != None,
+    ).all()
+    running_total = sum(t.pnl or 0 for t in prior_trades)
+
+    for trade_date in sorted(by_date.keys()):
+        day_trades = by_date[trade_date]
+        day_pnl    = sum(t.pnl or 0 for t in day_trades)
+        running_total += day_pnl
+        wins   = sum(1 for t in day_trades if (t.pnl or 0) > 0)
+        losses = sum(1 for t in day_trades if (t.pnl or 0) <= 0)
+
+        days.append({
+            "date":          trade_date,
+            "day_pnl":       round(day_pnl, 2),
+            "running_total": round(running_total, 2),
+            "trades":        len(day_trades),
+            "wins":          wins,
+            "losses":        losses,
+            "win_rate":      round(wins / len(day_trades) * 100, 1) if day_trades else 0,
+            "best_trade":    round(max((t.pnl or 0) for t in day_trades), 2),
+            "worst_trade":   round(min((t.pnl or 0) for t in day_trades), 2),
+            "trade_list": [
+                {
+                    "id":        t.id,
+                    "symbol":    t.symbol,
+                    "side":      t.side,
+                    "qty":       float(t.qty or 0),
+                    "entry":     float(t.entry_price or 0),
+                    "exit":      float(t.exit_price or 0),
+                    "pnl":       round(float(t.pnl or 0), 2),
+                    "running":   None,  # filled below
+                    "time":      str(t.closed_at or t.opened_at or ""),
+                    "setup":     t.setup_type or "",
+                    "conf":      round(float(t.confidence or 0) * 100, 0),
+                }
+                for t in day_trades
+            ],
+        })
+
+    # Fill per-trade running total within each day
+    day_running = running_total - sum(d["day_pnl"] for d in days)
+    for day in days:
+        day_running += 0
+        trade_running = day_running
+        for t in day["trade_list"]:
+            trade_running += t["pnl"]
+            t["running"] = round(trade_running, 2)
+        day_running = day["running_total"]
+
+    # Summary stats
+    all_pnl  = [t.pnl or 0 for t in trades]
+    total_trades = len(all_pnl)
+
+    return {
+        "period":          period,
+        "since":           str(since),
+        "total_pnl":       round(sum(all_pnl), 2),
+        "all_time_total":  round(running_total, 2),
+        "total_trades":    total_trades,
+        "winning_days":    sum(1 for d in days if d["day_pnl"] > 0),
+        "losing_days":     sum(1 for d in days if d["day_pnl"] < 0),
+        "best_day":        round(max((d["day_pnl"] for d in days), default=0), 2),
+        "worst_day":       round(min((d["day_pnl"] for d in days), default=0), 2),
+        "avg_day":         round(sum(d["day_pnl"] for d in days) / len(days), 2) if days else 0,
+        "days":            days,
+    }
+
+
 @app.get("/api/report/today", tags=["Reports"])
 async def daily_report(
     user: User    = Depends(get_current_user),

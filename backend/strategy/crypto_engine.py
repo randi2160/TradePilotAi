@@ -1026,39 +1026,66 @@ class CryptoEngine:
 
     def status(self) -> dict:
         import numpy as _np
+        import math
 
         def _safe(v):
-            """Convert numpy scalars to Python natives so FastAPI can JSON-encode them."""
+            """Convert numpy scalars and NaN/Inf to JSON-safe values."""
             if isinstance(v, (_np.bool_, _np.bool8 if hasattr(_np, 'bool8') else _np.bool_)):
                 return bool(v)
-            if isinstance(v, (_np.integer,)):
+            if isinstance(v, _np.integer):
                 return int(v)
-            if isinstance(v, (_np.floating,)):
-                return float(v)
+            if isinstance(v, _np.floating):
+                v = float(v)
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                return 0.0
             return v
+
+        def _safe_round(v, n=2):
+            try:
+                f = float(v)
+                if math.isnan(f) or math.isinf(f):
+                    return 0.0
+                return round(f, n)
+            except Exception:
+                return 0.0
 
         bp_raw = float(self.last_account_state.get("non_marginable_buying_power",
                        self.last_account_state.get("cash", 0))) if self.last_account_state else 0.0
         budget = round(self.capital * self.crypto_alloc, 2)
 
+        # Build coin stats summary for UI
+        coin_summary = {}
+        for ticker, s in self.coin_stats.items():
+            total = s["wins"] + s["losses"]
+            coin_summary[ticker] = {
+                "wins":       s["wins"],
+                "losses":     s["losses"],
+                "win_rate":   round(s["wins"] / total * 100, 1) if total > 0 else 0,
+                "total_pnl":  _safe_round(s["total_pnl"]),
+                "loss_streak": s["loss_streak"],
+            }
+
         return {
             "state":             self.state.value,
-            "realized_pnl":      round(self.realized_pnl, 2),
-            "compounded_gains":  round(self.compounded_gains, 2),
-            "locked_floor":      round(self.locked_floor, 2) if self.locked_floor else None,
-            "remaining_to_min":  round(self.remaining_to_min(), 2),
-            "remaining_to_desired": round(self.remaining_to_desired(), 2),
+            "realized_pnl":      _safe_round(self.realized_pnl),
+            "compounded_gains":  _safe_round(self.compounded_gains),
+            "locked_floor":      _safe_round(self.locked_floor) if self.locked_floor else None,
+            "remaining_to_min":  _safe_round(self.remaining_to_min()),
+            "remaining_to_desired": _safe_round(self.remaining_to_desired()),
             "open_positions":    len(self.open_positions),
             "trades_today":      self.trades_today,
             "stop_reason":       self.stop_reason,
             "last_error":        self._last_error,
             "cycle":             self.cycle_count,
             "min_probability":   self.min_probability,
-            "buying_power":      round(min(bp_raw, budget), 2) if bp_raw else budget,
+            "consecutive_losses": self.consecutive_losses,
+            "buying_power":      _safe_round(min(bp_raw, budget)) if bp_raw else budget,
             "crypto_budget":     budget,
+            "coin_stats":        coin_summary,
             "scan_results": [
                 {k: _safe(v) for k, v in s.items()}
                 for s in self._scan_results
+                if _safe(s.get("price", 0)) > 0  # skip NaN price entries
             ],
             "open_position_list": [
                 {
