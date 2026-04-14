@@ -1368,13 +1368,13 @@ async def pnl_history(
                     "symbol":    t.symbol,
                     "side":      t.side,
                     "qty":       float(t.qty or 0),
-                    "entry":     float(t.entry_price or 0),
-                    "exit":      float(t.exit_price or 0),
+                    "entry":     float(getattr(t, 'entry_price', 0) or 0),
+                    "exit":      float(getattr(t, 'exit_price',  0) or 0),
                     "pnl":       round(float(t.pnl or 0), 2),
-                    "running":   None,  # filled below
-                    "time":      str(t.closed_at or t.opened_at or ""),
-                    "setup":     t.setup_type or "",
-                    "conf":      round(float(t.confidence or 0) * 100, 0),
+                    "running":   None,
+                    "time":      str(getattr(t, 'closed_at', None) or getattr(t, 'opened_at', None) or ""),
+                    "setup":     getattr(t, 'setup_type', '') or "",
+                    "conf":      round(float(getattr(t, 'confidence', 0) or 0) * 100, 0),
                 }
                 for t in day_trades
             ],

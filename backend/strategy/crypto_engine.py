@@ -36,13 +36,21 @@ ALPACA_TRADEABLE = {
     "LINK", "AAVE", "SOL", "XRP", "SHIB",
 }
 
-# Import Binance scanner (fast, free, no auth)
+# Import Binance scanner — try multiple import paths (works on Windows + Linux)
+BINANCE_AVAILABLE = False
+_binance_scan  = None
+_binance_price = None
 try:
     from data.binance_scanner import scan_all_coins as _binance_scan, get_live_price as _binance_price
     BINANCE_AVAILABLE = True
 except ImportError:
-    BINANCE_AVAILABLE = False
-    logger.warning("Binance scanner not available — falling back to yfinance")
+    try:
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'data'))
+        from binance_scanner import scan_all_coins as _binance_scan, get_live_price as _binance_price
+        BINANCE_AVAILABLE = True
+    except ImportError:
+        logger.warning("Binance scanner not available — using yfinance fallback")
 
 
 class EngineState(Enum):
@@ -807,25 +815,36 @@ class CryptoEngine:
             import yfinance as yf
             import pandas as pd
             import numpy as np
+            import math
 
             def _yf_batch():
                 yf_syms = [f"{t}-USD" for t in CRYPTO_UNIVERSE]
                 try:
-                    df = yf.download(yf_syms, period="1d", interval="1m",
+                    df = yf.download(yf_syms, period="1d", interval="5m",
                                      progress=False, auto_adjust=True, group_by="ticker")
                     result = {}
                     for ticker in CRYPTO_UNIVERSE:
                         yf_sym = f"{ticker}-USD"
                         try:
                             if isinstance(df.columns, pd.MultiIndex):
-                                if yf_sym not in df.columns.get_level_values(0):
+                                lvl0 = df.columns.get_level_values(0)
+                                if yf_sym not in lvl0:
                                     continue
                                 sub = df[yf_sym].copy()
                             else:
                                 sub = df.copy()
                             sub.columns = [c.lower() for c in sub.columns]
-                            if "close" in sub.columns and len(sub) >= 5:
-                                result[ticker] = sub
+                            if "close" not in sub.columns or len(sub) < 5:
+                                continue
+                            sub = sub.dropna(subset=["close"])
+                            if len(sub) < 5:
+                                continue
+                            last_price = float(sub["close"].iloc[-1])
+                            # Skip if price is NaN, 0, or infinite
+                            if math.isnan(last_price) or last_price <= 0 or math.isinf(last_price):
+                                logger.debug(f"  Skipping {ticker}: invalid price {last_price}")
+                                continue
+                            result[ticker] = sub
                         except Exception:
                             continue
                     return result
@@ -840,8 +859,11 @@ class CryptoEngine:
             candidates = []
             for ticker, bars in bars_map.items():
                 try:
+                    import math
                     symbol = f"{ticker}/USD"
                     price  = float(bars["close"].iloc[-1])
+                    if math.isnan(price) or price <= 0:
+                        continue
                     scored = self.score_crypto_candidate(symbol, bars)
                     scored["ticker"] = ticker
                     scored["price"]  = price

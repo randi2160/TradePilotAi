@@ -2234,9 +2234,13 @@
     {
       "time": "2026-04-14T06:48:39.497940",
       "value": 97759.44
+    },
+    {
+      "time": "2026-04-14T07:03:37.755312",
+      "value": 97762.59
     }
   ],
-  "updated_at": "2026-04-14T06:48:39.497940",
+  "updated_at": "2026-04-14T07:11:59.088026",
   "stop_new_trades_hour": 15,
   "stop_new_trades_minute": 30,
   "max_open_positions": 3,
