@@ -1,0 +1,8 @@
+
+# SQLite temporary files
+*.db-shm
+*.db-wal
+
+# Data exports
+db_export.json
+docs_export.json
