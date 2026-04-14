@@ -772,7 +772,18 @@ class CryptoEngine:
         loop    = asyncio.get_event_loop()
         t0      = loop.time()
 
-        if BINANCE_AVAILABLE:
+        # Check if Binance is geo-blocked (AWS US servers get 451)
+        _binance_ok = BINANCE_AVAILABLE
+        if _binance_ok:
+            try:
+                from data.binance_scanner import BINANCE_BLOCKED as _bb
+                if _bb:
+                    _binance_ok = False
+                    logger.info("Binance geo-blocked — using yfinance fallback")
+            except ImportError:
+                pass
+
+        if _binance_ok:
             # Binance: ~200-400ms, real-time prices, no auth needed
             results  = await loop.run_in_executor(None, _binance_scan, CRYPTO_UNIVERSE)
             elapsed  = loop.time() - t0
