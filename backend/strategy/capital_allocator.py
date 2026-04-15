@@ -160,6 +160,11 @@ class CapitalAllocator:
         return result
 
     def _build_result(self, reasons, scalper_score, bounce_score) -> dict:
+        # FIX: Handle None total_capital (happens on first load)
+        if self.total_capital is None or self.total_capital == 0:
+            self.total_capital = 5000.0
+            logger.warning("total_capital was None, using default $5000")
+        
         scalper_cap = round(self.total_capital * self.scalper_pct, 2)
         bounce_cap  = round(self.total_capital * self.bounce_pct,  2)
         s_goal = round(self.daily_goal * self.scalper_pct, 2)
