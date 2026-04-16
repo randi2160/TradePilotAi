@@ -145,6 +145,7 @@ class CryptoEngine:
         min_probability: float = 0.40,   # lowered from 0.60 — crypto is volatile enough
         stop_at_min_target: bool = False,
         max_positions:  int   = 2,
+        user_id:        int   = None,
     ):
         self.broker          = broker
         self.target_min      = target_min
@@ -176,7 +177,7 @@ class CryptoEngine:
         self.last_refresh       = 0
         self.trades_today       = 0
         self._scan_results      = []
-        self._user_id           = 1
+        self._user_id           = user_id or 1  # per-user; fallback 1 for legacy
         self._reporter          = None
 
         # Milestone profit protection

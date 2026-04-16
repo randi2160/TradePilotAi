@@ -26,12 +26,14 @@ class StrategyEngine:
         tracker: DailyTargetTracker,
         risk: DynamicRiskManager,
         ensemble: EnsembleModel,
+        user_id: int = None,
     ):
         self.broker   = broker
         self.tracker  = tracker
         self.risk     = risk
         self.ensemble = ensemble
         self.pdt      = PDTComplianceEngine(broker)
+        self.user_id  = user_id  # per-user trade ownership
 
         self._signals: dict[str, dict] = {}
         self._open:    dict[str, dict] = {}
@@ -185,7 +187,7 @@ class StrategyEngine:
             db    = SessionLocal()
             today = str(datetime.now(ET).date())
             t = TradeModel(
-                user_id       = 1,   # default user; extend for multi-user
+                user_id       = self.user_id or 1,  # per-user; fallback 1 for legacy
                 symbol        = symbol,
                 side          = side,
                 qty           = sizing["qty"],

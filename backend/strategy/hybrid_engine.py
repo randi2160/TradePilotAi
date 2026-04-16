@@ -42,8 +42,10 @@ class HybridEngine:
         stock_engine,    # existing StrategyEngine
         mode: str = "hybrid",   # stocks_only | crypto_only | hybrid
         crypto_alloc_pct: float = 0.30,
+        user_id: int = None,
     ):
         self.broker        = broker
+        self.user_id       = user_id  # per-user trade ownership
         self.settings      = settings
         self.tracker       = tracker
         self.stock_engine  = stock_engine
@@ -198,6 +200,7 @@ class HybridEngine:
             compound_mode     = True,
             min_probability   = 0.55,
             max_positions     = 2,
+            user_id           = self.user_id,
         )
         # Apply user-configured milestones
         try:

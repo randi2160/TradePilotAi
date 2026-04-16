@@ -6,7 +6,7 @@ print('Open positions:', positions)
 for p in positions:
     sym = p.get('symbol','') if isinstance(p, dict) else str(p)
     try:
-        b.trading.close_position(sym)
+        b.close_position(sym)
         print('Closed:', sym)
     except Exception as e:
         print('Error:', sym, e)

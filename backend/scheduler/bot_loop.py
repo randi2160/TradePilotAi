@@ -123,7 +123,7 @@ class BotLoop:
             )
 
         t0 = _time.time()
-        self.engine       = StrategyEngine(self.broker, self.tracker, self.risk, self.ensemble)
+        self.engine       = StrategyEngine(self.broker, self.tracker, self.risk, self.ensemble, user_id=self.user_id)
         logger.info(
             f"bot.start[{uid_tag}] StrategyEngine constructed "
             f"+{_time.time()-t0:.2f}s"
@@ -370,7 +370,7 @@ class BotLoop:
         from database.database  import SessionLocal
         from services           import protection_service, ladder_service
 
-        user_id = 1  # single-user default, matches strategy/engine.py
+        user_id = self.user_id or 1  # per-user; fallback to 1 only for legacy system bot
         try:
             with SessionLocal() as db:
                 # 1a) Ladder tick — per-position peak tracking, trail exits,

@@ -188,8 +188,12 @@ async def _analyze_symbol(symbol: str, db: Session, user: User) -> dict:
     try:
         import pandas as pd
         import numpy as np
-        from scheduler.bot_loop import bot_loop
-        broker = bot_loop.broker
+        # Per-user broker lookup (the old `from scheduler.bot_loop import bot_loop`
+        # no longer exists — bot_loop.py only exports the BotLoop class, not a
+        # module-level singleton).
+        import main as _app_module
+        _bot = getattr(_app_module, "get_user_bot_if_exists", lambda uid: None)(user.id)
+        broker = _bot.broker if _bot else None
         if not broker:
             raise Exception("No broker")
 
@@ -514,8 +518,9 @@ async def run_daily_scan(
     # ── Step 1: Dynamic stock candidates from live market scan ────────────────
     stock_candidates = []
     try:
-        from scheduler.bot_loop import bot_loop
-        broker = bot_loop.broker
+        import main as _app_module
+        _bot = getattr(_app_module, "get_user_bot_if_exists", lambda uid: None)(user.id)
+        broker = _bot.broker if _bot else None
         if broker:
             from data.market_scanner import MarketScanner
             scanner = MarketScanner(broker)
