@@ -2,6 +2,8 @@
 Auth routes — register, login, profile management.
 All routes prefixed with /api/auth
 """
+import logging
+import time as _time
 from datetime import datetime
 from typing import Optional
 
@@ -17,6 +19,7 @@ from database.database import get_db
 from database.models import User, Watchlist
 import config
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
 
@@ -110,17 +113,54 @@ async def register(body: RegisterBody, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse, summary="Login and get JWT token")
 async def login(body: LoginBody, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == body.email.lower()).first()
-    if not user or not verify_password(body.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Account disabled")
+    """Login with per-step timing so slow logins can be diagnosed in pm2 logs.
 
-    user.last_login = datetime.utcnow()
-    db.commit()
+    Logs the duration of the User lookup, bcrypt verify, last_login commit, and
+    JWT mint. Look for `login[email=...]` lines in pm2 logs when login feels slow.
+    """
+    t_enter = _time.time()
+    email_norm = body.email.lower().strip()
+    tag = f"login[email={email_norm}]"
+    logger.info(f"{tag} ▶ entry")
 
-    token = create_access_token({"sub": user.email})
-    return {"access_token": token, "token_type": "bearer", "user": _user_dict(user)}
+    try:
+        t0 = _time.time()
+        user = db.query(User).filter(User.email == email_norm).first()
+        logger.info(f"{tag} user lookup +{_time.time()-t0:.3f}s (found={bool(user)})")
+
+        if not user:
+            logger.warning(f"{tag} ◀ 401 no-such-user total=+{_time.time()-t_enter:.3f}s")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        t0 = _time.time()
+        pw_ok = verify_password(body.password, user.hashed_password)
+        logger.info(f"{tag} bcrypt verify +{_time.time()-t0:.3f}s (ok={pw_ok})")
+
+        if not pw_ok:
+            logger.warning(f"{tag} ◀ 401 bad-password total=+{_time.time()-t_enter:.3f}s")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        if not user.is_active:
+            logger.warning(f"{tag} ◀ 403 inactive total=+{_time.time()-t_enter:.3f}s")
+            raise HTTPException(status_code=403, detail="Account disabled")
+
+        t0 = _time.time()
+        user.last_login = datetime.utcnow()
+        db.commit()
+        logger.info(f"{tag} last_login commit +{_time.time()-t0:.3f}s")
+
+        t0 = _time.time()
+        token = create_access_token({"sub": user.email})
+        logger.info(f"{tag} jwt mint +{_time.time()-t0:.3f}s")
+
+        logger.info(f"{tag} ◀ 200 OK total=+{_time.time()-t_enter:.3f}s uid={user.id}")
+        return {"access_token": token, "token_type": "bearer", "user": _user_dict(user)}
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(f"{tag} UNEXPECTED total=+{_time.time()-t_enter:.3f}s")
+        raise HTTPException(status_code=500, detail="Login failed")
 
 
 @router.get("/me", summary="Get current user profile")

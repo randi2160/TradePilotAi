@@ -58,27 +58,53 @@ class BotLoop:
         falls back to the .env admin creds (system=True) — this path is
         reserved for legacy or background system usage and its broker
         must never be surfaced to user-facing endpoints.
+
+        Every step is timed + logged so stuck startups are easy to diagnose
+        from pm2 logs. Look for lines prefixed with `bot.start[uid=N]`.
         """
+        import time as _time
+        uid_tag = f"uid={getattr(user, 'id', None)}"
+        t_enter = _time.time()
+        logger.info(
+            f"bot.start[{uid_tag}] ▶ entry mode={mode} "
+            f"trading_mode={trading_mode} current_status={self.status}"
+        )
+
         if self.status == "running":
+            logger.info(f"bot.start[{uid_tag}] already running — no-op")
             return
         # Refresh watchlist from settings before starting
         self.watchlist    = self._settings.get_watchlist()
         self.mode         = mode
         self.trading_mode = trading_mode
+        logger.info(
+            f"bot.start[{uid_tag}] watchlist loaded "
+            f"({len(self.watchlist)} syms) +{_time.time()-t_enter:.2f}s"
+        )
 
         if user is not None:
             # Per-user bot: require explicit saved creds. No .env fallback.
+            t0 = _time.time()
             from broker.broker_routes import _load_creds
             creds = _load_creds(user)
+            logger.info(
+                f"bot.start[{uid_tag}] creds loaded +{_time.time()-t0:.2f}s "
+                f"(has_key={bool(creds and creds.get('api_key'))})"
+            )
             if not creds or not creds.get("api_key"):
                 raise ValueError(
                     "NO_BROKER: Connect your Alpaca account in the My Broker "
                     "tab before starting the bot."
                 )
+            t0 = _time.time()
             self.broker = AlpacaClient(
                 paper      = (mode == "paper"),
                 api_key    = creds["api_key"],
                 api_secret = creds["api_secret"],
+            )
+            logger.info(
+                f"bot.start[{uid_tag}] AlpacaClient constructed "
+                f"+{_time.time()-t0:.2f}s"
             )
             # Scope tracker DB reads to this user's trades only
             try:
@@ -89,19 +115,36 @@ class BotLoop:
         else:
             # Legacy/system bot — .env creds (admin-scoped). Do NOT surface
             # this broker to user endpoints.
+            t0 = _time.time()
             self.broker = AlpacaClient(paper=(mode == "paper"), system=True)
+            logger.info(
+                f"bot.start[{uid_tag}] AlpacaClient (system) constructed "
+                f"+{_time.time()-t0:.2f}s"
+            )
 
+        t0 = _time.time()
         self.engine       = StrategyEngine(self.broker, self.tracker, self.risk, self.ensemble)
+        logger.info(
+            f"bot.start[{uid_tag}] StrategyEngine constructed "
+            f"+{_time.time()-t0:.2f}s"
+        )
         self.status       = "running"
 
         # ── Restore today's P&L from DB so restarts don't lose progress ──
+        t0 = _time.time()
         self.tracker.load_from_db()
+        logger.info(
+            f"bot.start[{uid_tag}] tracker.load_from_db "
+            f"+{_time.time()-t0:.2f}s realized=${self.tracker.realized_pnl:.2f}"
+        )
         self.tracker.record_session_start()
 
         self._task = asyncio.create_task(self._loop())
         logger.info(
-            f"Bot | Broker={mode.upper()} | Trading={trading_mode.upper()} | "
-            f"Restored P&L=${self.tracker.realized_pnl:.2f} | Watchlist={self.watchlist}"
+            f"bot.start[{uid_tag}] ✅ READY total=+{_time.time()-t_enter:.2f}s | "
+            f"Broker={mode.upper()} | Trading={trading_mode.upper()} | "
+            f"Restored P&L=${self.tracker.realized_pnl:.2f} | "
+            f"Watchlist={self.watchlist}"
         )
 
     async def stop(self):

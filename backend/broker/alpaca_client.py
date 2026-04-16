@@ -373,32 +373,38 @@ class AlpacaClient:
             return self.place_market_order(sym, qty, side)
 
     def close_position(self, symbol: str) -> dict:
-        """Close an entire position by symbol (market order)."""
+        """Close an entire position by symbol (market order).
+
+        Routes stocks as plain uppercase tickers ("TSLA") and cryptos through
+        `_crypto_symbol` ("BTC" → "BTC/USD"). Previously this used a broken
+        "len <= 5 and no slash" heuristic that treated every stock ticker
+        as crypto — so close_position("TSLA") tried "TSLA/USD" and then
+        fell back to "TSLAUSD", both 404. That silently disabled the ladder's
+        trail-exit/floor protection for all stock positions.
+        """
         try:
-            sym = self._crypto_symbol(symbol) if "/" not in symbol and len(symbol) <= 5 else symbol
+            is_crypto = self._is_crypto(symbol)
+            sym = self._crypto_symbol(symbol) if is_crypto else symbol.upper()
             result = self.trading.close_position(sym)
-            logger.info(f"Closed position: {symbol}")
-            return {"status": "closed", "symbol": symbol, "id": str(getattr(result, "id", ""))}
+            logger.info(f"Closed position: {sym}")
+            return {"status": "closed", "symbol": sym, "id": str(getattr(result, "id", ""))}
         except Exception as e:
             logger.error(f"close_position({symbol}): {e}")
-            # Try alternate symbol format
-            try:
-                alt = symbol.replace("/", "").replace("-", "") + "USD"
-                result = self.trading.close_position(alt)
-                logger.info(f"Closed position (alt): {alt}")
-                return {"status": "closed", "symbol": alt}
-            except Exception as e2:
-                logger.error(f"close_position alt ({symbol}): {e2}")
-                return {"error": str(e2)}
-        """Cancel all open orders. Returns list of cancelled order IDs."""
-        try:
-            result = self.trading.cancel_orders()
-            cancelled = [str(r.get("id", "")) for r in result if isinstance(r, dict)]
-            logger.info(f"Cancelled {len(cancelled)} open orders")
-            return cancelled
-        except Exception as e:
-            logger.error(f"cancel_all_orders: {e}")
-            return []
+            # Crypto-only fallback: try the dashless "BTCUSD" form a few older
+            # Alpaca endpoints accept. Never apply to stocks — that's what
+            # produced "TSLAUSD: symbol not found" spam in the old code.
+            if self._is_crypto(symbol):
+                try:
+                    alt = symbol.replace("/", "").replace("-", "").upper()
+                    if not alt.endswith("USD"):
+                        alt += "USD"
+                    result = self.trading.close_position(alt)
+                    logger.info(f"Closed position (crypto alt): {alt}")
+                    return {"status": "closed", "symbol": alt}
+                except Exception as e2:
+                    logger.error(f"close_position crypto-alt ({symbol}): {e2}")
+                    return {"error": str(e2)}
+            return {"error": str(e)}
 
     def get_open_orders(self) -> list:
         """Get all open orders."""
@@ -423,14 +429,6 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"get_open_orders: {e}")
             return []
-        try:
-            sym = self._crypto_symbol(symbol) if self._is_crypto(symbol) else symbol.upper()
-            self.trading.close_position(sym)
-            logger.info(f"Position {sym} closed")
-            return {"status": "closed", "symbol": sym}
-        except Exception as e:
-            logger.error(f"close_position({symbol}) error: {e}")
-            return {"error": str(e)}
 
     def close_all_positions(self):
         try:

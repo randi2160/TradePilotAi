@@ -582,6 +582,42 @@ async def health():
     }
 
 
+@app.get("/api/debug/ping-db", tags=["System"])
+async def ping_db():
+    """Measure RDS round-trip latency for three canonical queries.
+
+    Use this when login / bot-start feels slow to tell whether the network
+    path to RDS is the bottleneck. No auth — read-only, no secrets exposed.
+    """
+    import time as _time
+    from sqlalchemy import text
+    from database.database import SessionLocal
+    from database.models import User, Trade
+
+    out: dict = {"ok": True, "timings_ms": {}}
+    sess = SessionLocal()
+    try:
+        t0 = _time.time()
+        sess.execute(text("SELECT 1")).scalar()
+        out["timings_ms"]["select_1"] = round((_time.time() - t0) * 1000, 1)
+
+        t0 = _time.time()
+        n_users = sess.query(User).count()
+        out["timings_ms"]["count_users"] = round((_time.time() - t0) * 1000, 1)
+        out["user_count"] = n_users
+
+        t0 = _time.time()
+        n_trades = sess.query(Trade).count()
+        out["timings_ms"]["count_trades"] = round((_time.time() - t0) * 1000, 1)
+        out["trade_count"] = n_trades
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = str(e)
+    finally:
+        sess.close()
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Bot control (requires JWT)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -598,15 +634,30 @@ async def start_bot(body: BotStartBody, user: User = Depends(get_current_user)):
     If the caller hasn't connected their broker in the My Broker tab, we
     return 400 NO_BROKER so the UI can prompt them to connect before
     retrying.
+
+    Wrapped in timing + broad exception logging so pm2 logs tell us
+    exactly when the endpoint entered, when bot.start() returned, and
+    what (if anything) blew up. Without this, a hung startup looks
+    identical to a normal startup in the logs.
     """
+    import time as _time
+    t_enter = _time.time()
+    logger.info(f"/api/bot/start ▶ uid={user.id} email={user.email} mode={body.mode} trading_mode={body.trading_mode}")
     bot = get_user_bot(user)
     try:
         await bot.start(mode=body.mode, trading_mode=body.trading_mode, user=user)
     except ValueError as e:
         msg = str(e)
+        logger.warning(f"/api/bot/start uid={user.id} ValueError after {_time.time()-t_enter:.2f}s: {msg}")
         if msg.startswith("NO_BROKER"):
             raise HTTPException(status_code=400, detail=msg)
         raise HTTPException(status_code=400, detail=msg)
+    except Exception as e:
+        # Log-and-reraise so the frontend gets a 500 with a real message
+        # AND pm2 logs record the full traceback.
+        logger.exception(f"/api/bot/start uid={user.id} UNEXPECTED after {_time.time()-t_enter:.2f}s")
+        raise HTTPException(status_code=500, detail=f"Bot start failed: {e}")
+    logger.info(f"/api/bot/start ◀ uid={user.id} returned in {_time.time()-t_enter:.2f}s")
     return {"status": "started", "mode": body.mode, "trading_mode": body.trading_mode}
 
 @app.post("/api/bot/stop",   tags=["Bot"])
