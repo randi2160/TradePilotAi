@@ -19,10 +19,14 @@ class DailyTargetTracker:
         capital:          float = config.CAPITAL,
         daily_target_min: float = config.DAILY_TARGET_MIN,
         daily_target_max: float = config.DAILY_TARGET_MAX,
+        user_id:          Optional[int] = None,
     ):
         self.capital          = capital
         self.target_min       = daily_target_min
         self.target_max       = daily_target_max
+        # Per-user scoping for DB reads. When set, load_from_db filters
+        # trades by this user_id so each user's bot tracks only its own P&L.
+        self.user_id          = user_id
         self._today           = date.today()
         self.realized_pnl     = 0.0
         self.unrealized_pnl   = 0.0
@@ -54,11 +58,15 @@ class DailyTargetTracker:
         try:
             from database.models import Trade
             today = str(date.today())
-            trades = db_session.query(Trade).filter(
+            q = db_session.query(Trade).filter(
                 Trade.trade_date == today,
                 Trade.status     == "closed",
                 Trade.pnl        != None,
-            ).all()
+            )
+            # Per-user scoping — only restore THIS bot's trades.
+            if self.user_id is not None:
+                q = q.filter(Trade.user_id == self.user_id)
+            trades = q.all()
 
             self.realized_pnl = round(sum(t.pnl or 0 for t in trades), 2)
             self._trades = [

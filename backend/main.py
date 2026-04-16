@@ -25,7 +25,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import date, datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
@@ -160,15 +160,41 @@ _sys.excepthook = _log_unhandled
 # ── Rate limiter ─────────────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 
-# ── Shared singletons (not per-user — bot runs as single instance) ────────────
+# ── Shared singletons (infrastructure — read-only or shared by design) ───────
 settings     = SettingsManager()
-tracker      = DailyTargetTracker(
-    capital          = settings.get_capital(),
-    daily_target_min = settings.get_targets()["daily_target_min"],
-    daily_target_max = settings.get_targets()["daily_target_max"],
-)
-bot_loop           = BotLoop(tracker)
-bot_loop.watchlist = settings.get_watchlist()
+
+# ── Per-user bot registry ────────────────────────────────────────────────────
+# Each user who calls /api/bot/start gets their OWN BotLoop + tracker,
+# keyed by user_id. Trades run against that user's saved broker creds
+# (never .env). Starting/stopping one user's bot never affects another.
+#
+# The crypto HybridEngine (_hybrid_engine) is still a module-level singleton
+# for now — it runs against whichever user most recently hit
+# /api/bot/engine-mode and uses that caller's credentials. Migration to
+# per-user crypto is tracked separately.
+_bot_registry: Dict[int, BotLoop] = {}
+
+def get_user_bot(user) -> BotLoop:
+    """Fetch or lazily create this user's BotLoop + DailyTargetTracker."""
+    if user.id not in _bot_registry:
+        t = DailyTargetTracker(
+            capital          = settings.get_capital(),
+            daily_target_min = settings.get_targets()["daily_target_min"],
+            daily_target_max = settings.get_targets()["daily_target_max"],
+            user_id          = user.id,
+        )
+        bot = BotLoop(t, user_id=user.id)
+        bot.watchlist = settings.get_watchlist()
+        _bot_registry[user.id] = bot
+    return _bot_registry[user.id]
+
+def get_user_bot_if_exists(user_id: int) -> Optional[BotLoop]:
+    """Return the user's bot if it's been created, else None.
+
+    Used by read-only endpoints and background tasks that should NOT
+    auto-create a bot for a user who has never interacted with it.
+    """
+    return _bot_registry.get(user_id)
 
 news_scanner = NewsScanner()
 mkt_scanner  = MarketScanner()
@@ -182,14 +208,38 @@ ws_clients: List[WebSocket] = []
 # ── Background tasks ──────────────────────────────────────────────────────────
 
 async def equity_recorder():
-    """Record portfolio equity every 5 minutes to DB."""
+    """Record portfolio equity every 5 minutes (per-user).
+
+    Iterates the per-user bot registry — each running bot's equity is
+    recorded against its own user. Bots that aren't running are skipped.
+    For backward compatibility with the single-account equity history
+    file, only the admin's equity is written to the shared settings
+    snapshot; per-user equity history lives in the DB via TradeService.
+    """
     while True:
         await asyncio.sleep(300)
         try:
-            if bot_loop.broker:
-                acct = bot_loop.broker.get_account()
-                if acct:
-                    settings.record_equity(acct.get("equity", settings.get_capital()))
+            for uid, bot in list(_bot_registry.items()):
+                if bot.status != "running" or not bot.broker:
+                    continue
+                try:
+                    acct = bot.broker.get_account()
+                    if not acct:
+                        continue
+                    equity = acct.get("equity", settings.get_capital())
+                    # Only write to the shared settings snapshot for admin.
+                    # Per-user history comes from TradeService in DB.
+                    try:
+                        from database.database import SessionLocal
+                        from database.models   import User
+                        with SessionLocal() as db:
+                            u = db.query(User).filter_by(id=uid).first()
+                            if u and getattr(u, "is_admin", False):
+                                settings.record_equity(equity)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.warning(f"equity_recorder user={uid}: {e}")
         except Exception as e:
             logger.error(f"equity_recorder: {e}")
 
@@ -202,15 +252,24 @@ async def market_scan_loop():
         await asyncio.sleep(60)
 
 async def daily_summary_sender():
-    """Send daily summary email at 4:05 PM ET every trading day."""
+    """Send daily summary email at 4:05 PM ET every trading day (per-user)."""
     import pytz
     ET = pytz.timezone("America/New_York")
     while True:
         now = datetime.now(ET)
         if now.hour == 16 and now.minute == 5 and now.weekday() < 5:
             try:
-                stats = tracker.stats()
-                logger.info("Daily summary triggered")
+                # Log summary stats for every registered user's bot.
+                for uid, bot in list(_bot_registry.items()):
+                    try:
+                        stats = bot.tracker.stats()
+                        logger.info(
+                            f"Daily summary user={uid} "
+                            f"realized=${stats.get('realized_pnl',0):.2f} "
+                            f"trades={stats.get('trade_count',0)}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"daily_summary user={uid}: {e}")
             except Exception as e:
                 logger.error(f"daily_summary: {e}")
         await asyncio.sleep(60)
@@ -299,12 +358,13 @@ async def lifespan(app: FastAPI):
     # ── Shutdown: clean up everything ─────────────────────────────────────────
     logger.info("Shutting down — saving state…")
 
-    # Stop stock bot cleanly
-    try:
-        await bot_loop.stop()
-        logger.info("✅ Stock bot stopped cleanly")
-    except Exception as e:
-        logger.error(f"Stock bot stop error: {e}")
+    # Stop every user's stock bot cleanly
+    for uid, _bot in list(_bot_registry.items()):
+        try:
+            await _bot.stop()
+            logger.info(f"✅ Stock bot for user {uid} stopped cleanly")
+        except Exception as e:
+            logger.error(f"Stock bot stop error (user {uid}): {e}")
 
     # Stop crypto engine and log open positions
     global _hybrid_engine, _crypto_running
@@ -331,11 +391,12 @@ async def lifespan(app: FastAPI):
         from database.database import SessionLocal
         from database.models   import AuditLog
         db = SessionLocal()
+        running_bots = sum(1 for b in _bot_registry.values() if b.status == "running")
         db.add(AuditLog(
             user_id=1,
             action="SERVER_SHUTDOWN",
             details=f"Server shutdown at {datetime.now().isoformat()} | "
-                    f"bot_status={bot_loop.status} | "
+                    f"running_bots={running_bots}/{len(_bot_registry)} | "
                     f"crypto_running={_crypto_running}",
         ))
         db.commit()
@@ -435,50 +496,59 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
     try:
         while True:
             try:
-                summary = bot_loop.get_live_summary()
+                # Per-user bot payload. We deliberately do NOT auto-create a
+                # bot for users who have never started one — they get an
+                # empty, safe summary.
+                user_bot = get_user_bot_if_exists(user.id)
+                if user_bot is not None:
+                    summary = user_bot.get_live_summary()
+                else:
+                    summary = {
+                        "bot_status":       "stopped",
+                        "mode":             "paper",
+                        "trading_mode":     "auto",
+                        "dynamic_watchlist": False,
+                        "account":          {},
+                        "positions":        [],
+                        "signals":          [],
+                        "pending_trades":   [],
+                        "unusual_volume":   [],
+                        "active_watchlist": settings.get_watchlist(),
+                        "wl_scores":        {},
+                        "realized_pnl":     0,
+                        "unrealized_pnl":   0,
+                        "total_pnl":        0,
+                        "trade_count":      0,
+                    }
                 summary["settings"] = settings.all()
 
-                # ── SECURITY: overwrite admin-scoped account/positions ──────
-                # bot_loop.get_live_summary() fills `account` and `positions`
-                # from bot_loop.broker (the admin's .env-backed client). For
-                # each connected user we replace those two fields with data
-                # from their OWN saved Alpaca credentials.
-                try:
-                    user_broker = _resolve_broker(user)
-                except Exception:
-                    user_broker = None
-
-                if user_broker is not None:
-                    try:
-                        summary["account"]   = user_broker.get_account()   or {}
-                        summary["positions"] = user_broker.get_positions() or []
-                    except Exception:
-                        summary["account"]   = {}
-                        summary["positions"] = []
-                else:
-                    summary["account"]   = {}
-                    summary["positions"] = []
-
-                # Merge crypto engine P&L into the top-level summary
+                # Merge crypto engine P&L into the top-level summary.
+                # _hybrid_engine is still a singleton owned by whoever last
+                # hit /api/bot/engine-mode — only merge into that user's
+                # summary so non-owners never see someone else's crypto P&L.
                 global _hybrid_engine, _crypto_running
                 if _hybrid_engine is not None and _crypto_running:
                     try:
-                        crypto_status = _hybrid_engine.get_status()
-                        crypto = crypto_status.get("crypto") or {}
-                        crypto_pnl = float(crypto.get("realized_pnl", 0))
-                        if crypto_pnl != 0:
-                            # Add crypto P&L on top of stock P&L
-                            summary["realized_pnl"] = round(
-                                float(summary.get("realized_pnl", 0)) + crypto_pnl, 2
-                            )
-                            summary["total_pnl"] = round(
-                                float(summary.get("total_pnl", 0)) + crypto_pnl, 2
-                            )
-                            summary["crypto_pnl"] = crypto_pnl
-                            summary["trade_count"] = (
-                                int(summary.get("trade_count", 0)) +
-                                int(crypto.get("trades_today", 0))
-                            )
+                        crypto_owner_id = getattr(
+                            getattr(_hybrid_engine, "crypto_engine", None),
+                            "_user_id", None,
+                        )
+                        if crypto_owner_id == user.id:
+                            crypto_status = _hybrid_engine.get_status()
+                            crypto = crypto_status.get("crypto") or {}
+                            crypto_pnl = float(crypto.get("realized_pnl", 0))
+                            if crypto_pnl != 0:
+                                summary["realized_pnl"] = round(
+                                    float(summary.get("realized_pnl", 0)) + crypto_pnl, 2
+                                )
+                                summary["total_pnl"] = round(
+                                    float(summary.get("total_pnl", 0)) + crypto_pnl, 2
+                                )
+                                summary["crypto_pnl"] = crypto_pnl
+                                summary["trade_count"] = (
+                                    int(summary.get("trade_count", 0)) +
+                                    int(crypto.get("trades_today", 0))
+                                )
                     except Exception:
                         pass
 
@@ -501,12 +571,14 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
 
 @app.get("/health", tags=["System"])
 async def health():
+    running = sum(1 for b in _bot_registry.values() if b.status == "running")
     return {
-        "status":   "ok",
-        "db":       check_connection(),
-        "bot":      bot_loop.status,
-        "version":  "4.0.0",
-        "time":     datetime.utcnow().isoformat(),
+        "status":       "ok",
+        "db":           check_connection(),
+        "bots_running": running,
+        "bots_total":   len(_bot_registry),
+        "version":      "4.0.0",
+        "time":         datetime.utcnow().isoformat(),
     }
 
 
@@ -520,12 +592,30 @@ class BotStartBody(BaseModel):
 
 @app.post("/api/bot/start",  tags=["Bot"])
 async def start_bot(body: BotStartBody, user: User = Depends(get_current_user)):
-    await bot_loop.start(mode=body.mode, trading_mode=body.trading_mode)
+    """Start THIS user's bot against THEIR own Alpaca creds.
+
+    Per-user registry — starting user A's bot never affects user B's bot.
+    If the caller hasn't connected their broker in the My Broker tab, we
+    return 400 NO_BROKER so the UI can prompt them to connect before
+    retrying.
+    """
+    bot = get_user_bot(user)
+    try:
+        await bot.start(mode=body.mode, trading_mode=body.trading_mode, user=user)
+    except ValueError as e:
+        msg = str(e)
+        if msg.startswith("NO_BROKER"):
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
     return {"status": "started", "mode": body.mode, "trading_mode": body.trading_mode}
 
 @app.post("/api/bot/stop",   tags=["Bot"])
 async def stop_bot(user: User = Depends(get_current_user)):
-    await bot_loop.stop()
+    """Stop THIS user's bot only — other users' bots keep running."""
+    bot = get_user_bot_if_exists(user.id)
+    if bot is None:
+        return {"status": "stopped", "note": "no bot was running for this user"}
+    await bot.stop()
     return {"status": "stopped"}
 
 class EngineModeBody(BaseModel):
@@ -565,11 +655,16 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
     try:
         from strategy.hybrid_engine import HybridEngine
         from strategy.crypto_engine import CryptoPosition, EngineState
+        # Scope the hybrid engine to THIS user's stock bot + tracker so P&L
+        # and crypto allocation decisions are computed from this user's data
+        # only. If the user hasn't started their stock bot yet we still
+        # create their bot row (lazy) so the shared tracker is user-scoped.
+        user_bot = get_user_bot(user)
         _hybrid_engine = HybridEngine(
             broker           = broker,
             settings         = settings,
-            tracker          = tracker,
-            stock_engine     = getattr(bot_loop, "engine", None),
+            tracker          = user_bot.tracker,
+            stock_engine     = getattr(user_bot, "engine", None),
             mode             = body.mode,
             crypto_alloc_pct = body.crypto_alloc,
         )
@@ -668,10 +763,38 @@ async def run_crypto_cycle(user: User = Depends(get_current_user)):
 
 @app.get("/api/status",      tags=["Bot"])
 async def get_status(user: User = Depends(get_current_user)):
-    s = bot_loop.get_live_summary()
-    # SECURITY: get_live_summary() includes account + positions from
-    # bot_loop.broker (the admin's broker). Overwrite with the caller's own
-    # account/positions so users never see each other's portfolios.
+    """Live status for THIS user's bot only.
+
+    Per-user tracker → per-user P&L, trades, floor. No admin-scoped
+    zero-out hack is needed anymore because users who have never started
+    the bot simply get the empty-tracker defaults (zeros everywhere).
+    """
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is not None:
+        s = user_bot.get_live_summary()
+    else:
+        # No bot ever started for this user — return a zeroed stats shape
+        # from a throwaway tracker so the UI has a consistent schema.
+        _t = DailyTargetTracker(user_id=user.id)
+        s = {
+            **_t.stats(),
+            "bot_status":        "stopped",
+            "mode":              "paper",
+            "trading_mode":      "auto",
+            "dynamic_watchlist": False,
+            "account":           {},
+            "positions":         [],
+            "signals":           [],
+            "pending_trades":    [],
+            "unusual_volume":    [],
+            "active_watchlist":  settings.get_watchlist(),
+            "wl_scores":         {},
+        }
+
+    # SECURITY: always overwrite account + positions with the CALLER's own
+    # broker. get_live_summary() uses user_bot.broker, which is already the
+    # caller's broker when they've started their own bot — but if the bot
+    # was started before we store user creds, this is still a safety net.
     _usr_broker = _resolve_broker(user)
     if _usr_broker:
         try:
@@ -689,7 +812,10 @@ async def get_status(user: User = Depends(get_current_user)):
 
 @app.post("/api/train",      tags=["Bot"])
 async def retrain(user: User = Depends(get_current_user)):
-    asyncio.create_task(bot_loop._train_models())
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is None:
+        raise HTTPException(400, "Start your bot before retraining models.")
+    asyncio.create_task(user_bot._train_models())
     return {"status": "training started"}
 
 @app.post("/api/positions/close-all", tags=["Bot"])
@@ -706,7 +832,9 @@ class TradingModeBody(BaseModel):
 
 @app.put("/api/bot/trading-mode", tags=["Bot"])
 async def set_trading_mode(body: TradingModeBody, user: User = Depends(get_current_user)):
-    bot_loop.set_trading_mode(body.trading_mode)
+    # Applies to THIS user's bot only; creates the registry row if needed
+    # so subsequent /api/bot/start uses the selected mode.
+    get_user_bot(user).set_trading_mode(body.trading_mode)
     return {"trading_mode": body.trading_mode}
 
 class WatchlistModeBody(BaseModel):
@@ -714,7 +842,7 @@ class WatchlistModeBody(BaseModel):
 
 @app.put("/api/bot/watchlist-mode", tags=["Bot"])
 async def set_watchlist_mode(body: WatchlistModeBody, user: User = Depends(get_current_user)):
-    bot_loop.set_watchlist_dynamic(body.dynamic)
+    get_user_bot(user).set_watchlist_dynamic(body.dynamic)
     return {"dynamic_watchlist": body.dynamic}
 
 
@@ -816,16 +944,23 @@ async def close_manual_trade(
 
 @app.get("/api/pending-trades",                    tags=["Manual Mode"])
 async def get_pending(user: User = Depends(get_current_user)):
-    return bot_loop._pending_trades
+    user_bot = get_user_bot_if_exists(user.id)
+    return user_bot._pending_trades if user_bot else []
 
 @app.post("/api/pending-trades/{symbol}/approve",  tags=["Manual Mode"])
 async def approve(symbol: str, user: User = Depends(get_current_user)):
-    bot_loop.approve_pending_trade(symbol.upper())
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is None:
+        raise HTTPException(400, "No bot is running for this user.")
+    user_bot.approve_pending_trade(symbol.upper())
     return {"status": "approved", "symbol": symbol.upper()}
 
 @app.post("/api/pending-trades/{symbol}/reject",   tags=["Manual Mode"])
 async def reject(symbol: str, user: User = Depends(get_current_user)):
-    bot_loop.reject_pending_trade(symbol.upper())
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is None:
+        raise HTTPException(400, "No bot is running for this user.")
+    user_bot.reject_pending_trade(symbol.upper())
     return {"status": "rejected", "symbol": symbol.upper()}
 
 
@@ -926,7 +1061,8 @@ async def get_trades(user: User = Depends(get_current_user), db: Session = Depen
 
 @app.get("/api/signals",        tags=["Data"])
 async def get_signals(user: User = Depends(get_current_user)):
-    return bot_loop.get_latest_signals()
+    user_bot = get_user_bot_if_exists(user.id)
+    return user_bot.get_latest_signals() if user_bot else []
 
 @app.get("/api/positions",      tags=["Data"])
 async def get_positions(user: User = Depends(get_current_user)):
@@ -1334,8 +1470,12 @@ async def watchlist_sentiment(user: User = Depends(get_current_user)):
 async def get_advice(force: bool = False, user: User = Depends(get_current_user)):
     scan      = await mkt_scanner.scan()
     sentiment = await news_scanner.scan_watchlist(settings.get_watchlist())
-    signals   = bot_loop.get_latest_signals()
-    stats     = tracker.stats()
+    # Per-user signals + stats. If user hasn't started a bot, show empty
+    # signals and a zeroed tracker snapshot rather than leaking admin P&L.
+    user_bot  = get_user_bot_if_exists(user.id)
+    signals   = user_bot.get_latest_signals() if user_bot else []
+    stats     = (user_bot.tracker.stats()
+                 if user_bot else DailyTargetTracker(user_id=user.id).stats())
     # SECURITY: per-user positions only — never expose admin's portfolio.
     _usr_broker = _resolve_broker(user)
     positions = _usr_broker.get_positions() if _usr_broker else []
@@ -1345,13 +1485,17 @@ async def get_advice(force: bool = False, user: User = Depends(get_current_user)
 async def suggest_watchlist(user: User = Depends(get_current_user)):
     scan      = await mkt_scanner.scan()
     sentiment = await news_scanner.scan_watchlist(settings.get_watchlist())
-    signals   = bot_loop.get_latest_signals()
-    await bot_loop._wl_builder.build(scan, sentiment, signals)
-    return bot_loop._wl_builder.get_scores()
+    # Use THIS user's bot signals + watchlist builder so scoring reflects
+    # their own holdings + scan history, not the admin's.
+    user_bot  = get_user_bot(user)
+    signals   = user_bot.get_latest_signals()
+    await user_bot._wl_builder.build(scan, sentiment, signals)
+    return user_bot._wl_builder.get_scores()
 
 @app.get("/api/ai/unusual-volume",    tags=["AI Advisor"])
 async def unusual_volume(user: User = Depends(get_current_user)):
-    return bot_loop._unusual_volume
+    user_bot = get_user_bot_if_exists(user.id)
+    return user_bot._unusual_volume if user_bot else []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1436,7 +1580,12 @@ async def update_capital(body: CapitalBody,
                          user: User = Depends(get_current_user),
                          db:   Session = Depends(get_db)):
     settings.set_capital(body.capital)
-    tracker.capital = body.capital
+    # Update THIS user's tracker if it exists. Shared `settings` stays the
+    # default used at tracker creation time for any user who hasn't started
+    # their bot yet.
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is not None:
+        user_bot.tracker.capital = body.capital
     user.capital    = body.capital
     db.commit()
     return {"capital": body.capital, "status": "updated"}
@@ -1451,8 +1600,10 @@ async def update_targets(body: TargetsBody,
                          user: User = Depends(get_current_user),
                          db:   Session = Depends(get_db)):
     settings.set_targets(body.daily_target_min, body.daily_target_max, body.max_daily_loss)
-    tracker.target_min      = body.daily_target_min
-    tracker.target_max      = body.daily_target_max
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is not None:
+        user_bot.tracker.target_min = body.daily_target_min
+        user_bot.tracker.target_max = body.daily_target_max
     user.daily_target_min   = body.daily_target_min
     user.daily_target_max   = body.daily_target_max
     user.max_daily_loss     = body.max_daily_loss
@@ -1511,10 +1662,20 @@ async def get_watchlist(user: User = Depends(get_current_user)):
 class WatchlistBody(BaseModel):
     symbols: List[str]
 
+def _refresh_all_bots_watchlist():
+    """Shared watchlist is stored in settings; push the new list into every
+    running user bot. Swallow per-bot errors so one bad bot can't block the
+    settings write."""
+    for uid, bot in list(_bot_registry.items()):
+        try:
+            bot.refresh_watchlist()
+        except Exception as e:
+            logger.warning(f"refresh_watchlist user={uid}: {e}")
+
 @app.put("/api/watchlist",              tags=["Watchlist"])
 async def set_watchlist(body: WatchlistBody, user: User = Depends(get_current_user)):
     settings.set_watchlist(body.symbols)
-    bot_loop.refresh_watchlist()   # sync immediately
+    _refresh_all_bots_watchlist()
     return {"watchlist": settings.get_watchlist()}
 
 class SymbolBody(BaseModel):
@@ -1523,10 +1684,7 @@ class SymbolBody(BaseModel):
 @app.post("/api/watchlist/add",         tags=["Watchlist"])
 async def add_symbol(body: SymbolBody, user: User = Depends(get_current_user)):
     settings.add_symbol(body.symbol)
-    try:
-        bot_loop.refresh_watchlist()
-    except Exception as e:
-        logger.warning(f"refresh_watchlist failed (bot may not be running): {e}")
+    _refresh_all_bots_watchlist()
     wl = settings.get_watchlist()
     logger.info(f"Symbol {body.symbol.upper()} added. Watchlist now: {wl}")
     return {"watchlist": wl, "added": body.symbol.upper(), "status": "saved"}
@@ -1534,7 +1692,7 @@ async def add_symbol(body: SymbolBody, user: User = Depends(get_current_user)):
 @app.delete("/api/watchlist/{symbol}",  tags=["Watchlist"])
 async def remove_symbol(symbol: str, user: User = Depends(get_current_user)):
     settings.remove_symbol(symbol)
-    bot_loop.refresh_watchlist()   # sync immediately
+    _refresh_all_bots_watchlist()
     wl = settings.get_watchlist()
     logger.info(f"Symbol {symbol.upper()} removed. Watchlist now: {wl}")
     return {"watchlist": wl, "removed": symbol.upper()}
@@ -1561,10 +1719,12 @@ class GoalBody(BaseModel):
 @app.post("/api/goals/set", tags=["Goals"])
 async def set_goal(body: GoalBody, user: User = Depends(get_current_user)):
     plan = goal_engine.set_monthly_goal(body.monthly_goal, body.capital, body.risk_tolerance)
-    # Auto-update daily targets
+    # Auto-update daily targets — shared settings + this user's tracker.
     settings.set_targets(plan["daily_target_min"], plan["daily_target_max"], body.capital * 0.03)
-    tracker.target_min = plan["daily_target_min"]
-    tracker.target_max = plan["daily_target_max"]
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is not None:
+        user_bot.tracker.target_min = plan["daily_target_min"]
+        user_bot.tracker.target_max = plan["daily_target_max"]
     return plan
 
 @app.get("/api/goals/plan", tags=["Goals"])
@@ -1748,8 +1908,10 @@ async def daily_report(
         positions  = _usr_broker.get_positions() or []
         unrealized = sum(float(p.get("unrealized_pnl", 0)) for p in positions)
 
-    # Merge with in-memory tracker (might have trades not yet saved)
-    mem_stats = tracker.stats()
+    # Merge with THIS user's in-memory tracker (may have trades not yet saved).
+    user_bot  = get_user_bot_if_exists(user.id)
+    mem_stats = (user_bot.tracker.stats() if user_bot
+                 else DailyTargetTracker(user_id=user.id).stats())
     if mem_stats["realized_pnl"] > realized_pnl:
         realized_pnl = mem_stats["realized_pnl"]
 
@@ -1757,7 +1919,7 @@ async def daily_report(
     target_max = user.daily_target_max or config.DAILY_TARGET_MAX
     progress   = round(min(max(realized_pnl / target_min * 100, 0), 100), 1) if target_min > 0 else 0
 
-    signals = bot_loop.get_latest_signals()
+    signals = user_bot.get_latest_signals() if user_bot else []
     plan    = goal_engine.get_current_plan()
 
     return {
@@ -1801,7 +1963,7 @@ async def daily_report(
         "signals":   signals[:10],
         "goal":      plan,
         "session": {
-            "bot_status":    bot_loop.status,
+            "bot_status":    user_bot.status if user_bot else "stopped",
             "session_start": mem_stats.get("session_start"),
             "session_stop":  mem_stats.get("session_stop"),
             "db_loaded":     mem_stats.get("db_loaded", False),
@@ -1816,18 +1978,20 @@ async def get_events(limit: int = 50, event_type: str = None,
 
 @app.get("/api/report/live-activity", tags=["Reports"])
 async def live_activity(user: User = Depends(get_current_user)):
-    stats     = tracker.stats()
+    user_bot = get_user_bot_if_exists(user.id)
+    stats    = (user_bot.tracker.stats() if user_bot
+                else DailyTargetTracker(user_id=user.id).stats())
     # SECURITY: per-user positions only.
     _usr_broker = _resolve_broker(user)
     positions = _usr_broker.get_positions() if _usr_broker else []
-    signals   = bot_loop.get_latest_signals()
+    signals   = user_bot.get_latest_signals() if user_bot else []
     return {
         "stats":     stats,
         "positions": positions,
         "signals":   signals,
         "events":    reporter.get_events(30),
-        "bot_status": bot_loop.status,
-        "active_watchlist": bot_loop.watchlist,
+        "bot_status":       user_bot.status    if user_bot else "stopped",
+        "active_watchlist": user_bot.watchlist if user_bot else settings.get_watchlist(),
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1987,10 +2151,13 @@ async def check_rules(symbol: str, user: User = Depends(get_current_user)):
         acct   = broker.get_account()
         equity = float(acct.get("equity", user.capital)) if acct else user.capital
 
+        # Use THIS user's realized P&L (not the admin's) when checking rules.
+        _ub = get_user_bot_if_exists(user.id)
+        _daily_pnl = _ub.tracker.realized_pnl if _ub else 0.0
         rules  = HardRulesEngine().check_all(
             symbol=symbol.upper(), price=price, setup=setup,
             vwap_info=vwap, regime=regime,
-            daily_pnl=tracker.realized_pnl,
+            daily_pnl=_daily_pnl,
             capital=equity,
             open_positions=len(broker.get_positions() or []),
             daily_loss_limit=user.max_daily_loss,
@@ -2005,15 +2172,16 @@ async def check_rules(symbol: str, user: User = Depends(get_current_user)):
 
 @app.post("/api/watchlist/rebuild", tags=["Watchlist"])
 async def rebuild_dynamic_watchlist(user: User = Depends(get_current_user)):
-    """Force an immediate rebuild of the dynamic watchlist from live market data."""
-    if not bot_loop.broker:
+    """Force an immediate rebuild of THIS user's dynamic watchlist."""
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is None or not user_bot.broker:
         raise HTTPException(400, "Start the bot first — needs live market data")
     try:
-        await bot_loop._build_dynamic_watchlist()
-        scores = bot_loop._wl_builder.get_scores()
+        await user_bot._build_dynamic_watchlist()
+        scores = user_bot._wl_builder.get_scores()
         return {
             "status":    "rebuilt",
-            "watchlist": bot_loop._wl_builder._dynamic_list,
+            "watchlist": user_bot._wl_builder._dynamic_list,
             "built_at":  scores.get("built_at"),
             "scores":    scores.get("scores", {}),
             "total_scanned": scores.get("total_scanned", 0),
@@ -2023,8 +2191,11 @@ async def rebuild_dynamic_watchlist(user: User = Depends(get_current_user)):
 
 @app.get("/api/watchlist/scores", tags=["Watchlist"])
 async def get_watchlist_scores(user: User = Depends(get_current_user)):
-    """Get scores/reasons for why each stock was selected."""
-    return bot_loop._wl_builder.get_scores()
+    """Get scores/reasons for why each stock was selected (this user's bot)."""
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot is None:
+        return {"scores": {}, "built_at": None, "total_scanned": 0}
+    return user_bot._wl_builder.get_scores()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Live Ticker — real-time prices for watchlist
@@ -2050,10 +2221,13 @@ async def get_symbol_price(symbol: str, user: User = Depends(get_current_user)):
 
 @app.get("/api/bot/active-watchlist", tags=["Bot"])
 async def get_active_watchlist(user: User = Depends(get_current_user)):
-    """Show exactly what stocks the bot is currently scanning."""
-    if bot_loop._dynamic_mode and bot_loop._wl_builder._dynamic_list:
-        active = bot_loop._wl_builder.get_active_list()
-        scores = bot_loop._wl_builder.get_scores()
+    """Show exactly what stocks THIS user's bot is currently scanning."""
+    user_bot = get_user_bot_if_exists(user.id)
+    if (user_bot is not None
+            and user_bot._dynamic_mode
+            and user_bot._wl_builder._dynamic_list):
+        active = user_bot._wl_builder.get_active_list()
+        scores = user_bot._wl_builder.get_scores()
         return {
             "mode":     "dynamic",
             "watchlist": active,

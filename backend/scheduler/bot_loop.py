@@ -24,11 +24,13 @@ ET     = pytz.timezone("America/New_York")
 
 
 class BotLoop:
-    def __init__(self, tracker: DailyTargetTracker):
+    def __init__(self, tracker: DailyTargetTracker, user_id: int = None):
         self.tracker       = tracker
         self.status        = "stopped"
         self.mode          = "paper"
         self.trading_mode  = "auto"
+        # Per-user ownership. None = legacy/system bot (.env admin fallback).
+        self.user_id       = user_id
 
         self._wl_builder   = DynamicWatchlistBuilder()
         self._dynamic_mode = False
@@ -48,20 +50,47 @@ class BotLoop:
 
     # ── Control ───────────────────────────────────────────────────────────────
 
-    async def start(self, mode: str = "paper", trading_mode: str = "auto"):
+    async def start(self, mode: str = "paper", trading_mode: str = "auto", user=None):
+        """Start this user's bot.
+
+        If `user` is provided, load their saved broker credentials and
+        trade against their own Alpaca account. If `user` is None, the bot
+        falls back to the .env admin creds (system=True) — this path is
+        reserved for legacy or background system usage and its broker
+        must never be surfaced to user-facing endpoints.
+        """
         if self.status == "running":
             return
         # Refresh watchlist from settings before starting
         self.watchlist    = self._settings.get_watchlist()
         self.mode         = mode
         self.trading_mode = trading_mode
-        # The bot loop runs a single shared trading session against the
-        # .env-configured admin/operator account. This is `system=True` so
-        # the AlpacaClient constructor allows the .env fallback — but NOTE:
-        # bot_loop.broker must NEVER be surfaced directly to end-user
-        # endpoints. Per-user requests must go through `_resolve_broker(user)`
-        # in main.py, which loads each user's saved credentials.
-        self.broker       = AlpacaClient(paper=(mode == "paper"), system=True)
+
+        if user is not None:
+            # Per-user bot: require explicit saved creds. No .env fallback.
+            from broker.broker_routes import _load_creds
+            creds = _load_creds(user)
+            if not creds or not creds.get("api_key"):
+                raise ValueError(
+                    "NO_BROKER: Connect your Alpaca account in the My Broker "
+                    "tab before starting the bot."
+                )
+            self.broker = AlpacaClient(
+                paper      = (mode == "paper"),
+                api_key    = creds["api_key"],
+                api_secret = creds["api_secret"],
+            )
+            # Scope tracker DB reads to this user's trades only
+            try:
+                self.tracker.user_id = user.id
+            except Exception:
+                pass
+            self.user_id = user.id
+        else:
+            # Legacy/system bot — .env creds (admin-scoped). Do NOT surface
+            # this broker to user endpoints.
+            self.broker = AlpacaClient(paper=(mode == "paper"), system=True)
+
         self.engine       = StrategyEngine(self.broker, self.tracker, self.risk, self.ensemble)
         self.status       = "running"
 
