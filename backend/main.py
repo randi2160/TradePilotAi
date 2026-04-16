@@ -719,6 +719,7 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
             mode             = body.mode,
             crypto_alloc_pct = body.crypto_alloc,
             user_id          = user.id,
+            ensemble         = getattr(user_bot, "ensemble", None),
         )
         _crypto_running = True
         # Wire in user context for DB saves and activity feed

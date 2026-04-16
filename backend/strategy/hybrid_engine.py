@@ -43,6 +43,7 @@ class HybridEngine:
         mode: str = "hybrid",   # stocks_only | crypto_only | hybrid
         crypto_alloc_pct: float = 0.30,
         user_id: int = None,
+        ensemble = None,  # EnsembleModel — shared ML layer for crypto+stocks
     ):
         self.broker        = broker
         self.user_id       = user_id  # per-user trade ownership
@@ -51,6 +52,7 @@ class HybridEngine:
         self.stock_engine  = stock_engine
         self.mode          = mode
         self.crypto_alloc  = crypto_alloc_pct
+        self.ensemble      = ensemble  # passed to crypto engine for ML scoring
 
         self.crypto_engine: Optional[CryptoEngine] = None
         self._running      = False
@@ -201,6 +203,7 @@ class HybridEngine:
             min_probability   = 0.55,
             max_positions     = 2,
             user_id           = self.user_id,
+            ensemble          = self.ensemble,
         )
         # Apply user-configured milestones
         try:

@@ -438,20 +438,46 @@ class BotLoop:
         return _Shim()
 
     async def _train_models(self):
+        """Train ML ensemble on stock + crypto bars for better predictions."""
+        from data.indicators import add_all_indicators
+        trained = False
         try:
+            # 1) Train on stock symbols (existing behavior)
             for symbol in (self._settings.get_watchlist() or config.DEFAULT_WATCHLIST)[:3]:
                 if not self.broker:
                     break
                 df = self.broker.get_bars(symbol, timeframe="5Min", limit=1000)
                 if df.empty:
                     continue
-                from data.indicators import add_all_indicators
                 df = add_all_indicators(df)
                 if self.ensemble.train(df):
-                    logger.info(f"ML trained on {symbol} ✓")
+                    logger.info(f"ML trained on stock {symbol} ✓")
+                    trained = True
                     break
         except Exception as e:
-            logger.error(f"Training: {e}")
+            logger.error(f"Stock training: {e}")
+
+        # 2) Also train on top crypto symbols so crypto engine gets ML signal
+        try:
+            crypto_train_symbols = ["BTC/USD", "ETH/USD"]
+            for symbol in crypto_train_symbols:
+                if not self.broker:
+                    break
+                df = self.broker.get_crypto_bars(symbol, timeframe="5Min", limit=1000)
+                if df is None or df.empty:
+                    continue
+                df = add_all_indicators(df)
+                if self.ensemble.train(df):
+                    logger.info(f"ML trained on crypto {symbol} ✓")
+                    trained = True
+                    break
+        except Exception as e:
+            logger.error(f"Crypto training: {e}")
+
+        if trained:
+            logger.info(f"ML ensemble ready — is_trained={self.ensemble.is_trained}")
+        else:
+            logger.warning("ML training: no model trained this cycle (insufficient data)")
 
     def get_latest_signals(self) -> list:
         return self.engine.get_signals() if self.engine else []

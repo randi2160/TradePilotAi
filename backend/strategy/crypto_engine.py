@@ -18,6 +18,8 @@ from datetime   import datetime, timezone
 from enum       import Enum
 from typing     import Optional, List, Dict
 
+from data.indicators import add_all_indicators
+
 logger = logging.getLogger(__name__)
 
 # Alpaca paper trading ONLY supports these crypto symbols.
@@ -146,8 +148,10 @@ class CryptoEngine:
         stop_at_min_target: bool = False,
         max_positions:  int   = 2,
         user_id:        int   = None,
+        ensemble              = None,   # EnsembleModel — ML layer (optional)
     ):
         self.broker          = broker
+        self.ensemble        = ensemble  # ML predictions boost/penalize heuristic score
         self.target_min      = target_min
         self.target_desired  = target_desired
         self.target_stretch  = target_stretch
@@ -515,6 +519,33 @@ class CryptoEngine:
                 score -= 10
             if momentum < -0.5:
                 score -= 10  # falling fast — extra penalty
+
+            # ── ML Ensemble boost/penalty (±15 points) ────────────────
+            ml_signal   = None
+            ml_prob     = None
+            ml_trained  = False
+            if self.ensemble and self.ensemble.is_trained and len(bars) >= 52:
+                try:
+                    df_ml = add_all_indicators(bars.copy())
+                    if not df_ml.empty:
+                        pred       = self.ensemble.predict(df_ml)
+                        ml_signal  = pred.get("signal", "HOLD")
+                        ml_prob    = pred.get("confidence", 0.5)
+                        ml_trained = pred.get("ml_trained", False)
+                        # BUY signal with high confidence → boost up to +15
+                        if ml_signal == "BUY" and ml_prob >= 0.5:
+                            ml_boost = min(15, (ml_prob - 0.5) * 30)  # 0.5→0, 1.0→+15
+                            score += ml_boost
+                            logger.debug(f"ML {symbol}: BUY conf={ml_prob:.2f} → +{ml_boost:.1f}")
+                        # SELL signal → penalize up to -15
+                        elif ml_signal == "SELL" and ml_prob >= 0.5:
+                            ml_penalty = min(15, (ml_prob - 0.5) * 30)
+                            score -= ml_penalty
+                            logger.debug(f"ML {symbol}: SELL conf={ml_prob:.2f} → -{ml_penalty:.1f}")
+                        # HOLD or low-conf → no change
+                except Exception as e:
+                    logger.debug(f"ML score_crypto {symbol}: {e}")
+
             score = max(0, score)
 
             # Probability estimate
@@ -535,6 +566,9 @@ class CryptoEngine:
                 "downtrend":     downtrend,
                 "expected_move": round(expected_move, 6),
                 "exp_profit":    round(exp_profit, 2),
+                "ml_signal":     ml_signal,
+                "ml_confidence": ml_prob,
+                "ml_trained":    ml_trained,
                 # HARD GATE: invalid if downtrend OR below confidence threshold
                 "valid":         (not downtrend) and probability >= self.min_probability and exp_profit > 0,
             }
