@@ -41,3 +41,6 @@ Thumbs.db
 *.key
 *.cert
 secrets/
+backend/models/saved/*.pkl
+backend/user_settings.json
+backend/trading_goals.json
