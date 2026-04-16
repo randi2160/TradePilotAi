@@ -8,12 +8,14 @@ from datetime import datetime
 import pytz
 
 import config
-from broker.alpaca_client  import AlpacaClient
-from data.indicators       import add_all_indicators
-from models.ensemble       import EnsembleModel
-from strategy.daily_target import DailyTargetTracker
-from strategy.risk_manager import DynamicRiskManager
-from strategy.pdt_engine   import PDTComplianceEngine
+from broker.alpaca_client      import AlpacaClient
+from data.indicators           import add_all_indicators
+from data.regime_detector      import RegimeDetector
+from models.ensemble           import EnsembleModel
+from strategy.daily_target     import DailyTargetTracker
+from strategy.risk_manager     import DynamicRiskManager
+from strategy.pdt_engine       import PDTComplianceEngine
+from strategy.setup_classifier import SetupClassifier
 
 logger = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
@@ -35,14 +37,60 @@ class StrategyEngine:
         self.pdt      = PDTComplianceEngine(broker)
         self.user_id  = user_id  # per-user trade ownership
 
+        # AI setup analysis — enriches trades with quality score + regime awareness
+        self.setup_classifier = SetupClassifier()
+        self.regime_detector  = RegimeDetector()
+        self._current_regime  = None       # refreshed every scan cycle
+        self._regime_df       = None       # SPY bars for regime detection
+
         self._signals: dict[str, dict] = {}
         self._open:    dict[str, dict] = {}
 
     # ── Main scan ─────────────────────────────────────────────────────────────
 
+    def _refresh_regime(self):
+        """Refresh market regime from SPY bars (cached, only fetches every ~5 min)."""
+        try:
+            spy_df = self.broker.get_bars("SPY", timeframe="5Min", limit=100)
+            if spy_df is not None and not spy_df.empty and len(spy_df) >= 30:
+                self._regime_df      = spy_df
+                self._current_regime = self.regime_detector.detect(spy_df)
+                logger.debug(
+                    f"Market regime: {self._current_regime.get('regime')} "
+                    f"({self._current_regime.get('description','')})"
+                )
+        except Exception as e:
+            logger.debug(f"Regime refresh: {e}")
+        if self._current_regime is None:
+            self._current_regime = self.regime_detector._default()
+
+    def _classify_setup(self, symbol: str, df, signal: dict) -> dict:
+        """Run setup classifier for quality scoring. Returns setup dict."""
+        try:
+            regime = self._current_regime or self.regime_detector._default()
+            # Build VWAP info from indicators
+            cur = df.iloc[-1]
+            vwap_est = float(cur.get("ema_21", cur["close"]))  # EMA21 as VWAP proxy
+            vwap_info = {
+                "vwap":       vwap_est,
+                "above_vwap": float(cur["close"]) > vwap_est,
+                "reclaim":    float(cur["close"]) > vwap_est and float(df.iloc[-2]["close"]) <= vwap_est,
+            }
+            indicators = {
+                "rsi":          float(cur.get("rsi", 50)),
+                "macd_diff":    float(cur.get("macd_diff", 0)),
+                "bb_pct":       float(cur.get("bb_pct", 0.5)),
+                "volume_ratio": float(cur.get("volume_ratio", 1.0)),
+                "atr":          float(cur.get("atr", 0)),
+            }
+            return self.setup_classifier.classify(df, symbol, regime, vwap_info, indicators)
+        except Exception as e:
+            logger.debug(f"Setup classify {symbol}: {e}")
+            return {"setup_type": "unknown", "tradeable": True, "quality": 50}
+
     async def scan_symbol(self, symbol: str) -> dict:
         """
-        Full cycle for one symbol: fetch → indicators → ensemble → act.
+        Full cycle for one symbol: fetch → indicators → ensemble → setup classify → act.
         Returns the signal dict (enriched with action taken).
         """
         stop, stop_reason = self.tracker.should_stop()
@@ -61,25 +109,54 @@ class StrategyEngine:
         if df.empty:
             return {"symbol": symbol, "signal": "HOLD", "reason": "Indicator calc failed"}
 
-        # ── 2. Ensemble signal ────────────────────────────────────────────────
+        # ── 1b. Refresh market regime (once per scan cycle, cached) ───────────
+        if self._current_regime is None:
+            self._refresh_regime()
+
+        # ── 2. Ensemble signal (PRESERVED — existing ML + technical layer) ────
         signal = self.ensemble.predict(df)
         signal["symbol"] = symbol
         signal["price"]  = float(df["close"].iloc[-1])
+
+        # ── 2b. Setup classification (ADDITIVE — enriches signal, gates low-quality) ──
+        setup = self._classify_setup(symbol, df, signal)
+        signal["setup"]         = setup.get("setup_type", "unknown")
+        signal["setup_quality"] = setup.get("quality", 0)
+        signal["setup_tradeable"] = setup.get("tradeable", True)
+        signal["regime"]        = (self._current_regime or {}).get("regime", "neutral")
+        if setup.get("description"):
+            signal.setdefault("reasons", []).append(setup["description"])
+
         self._signals[symbol] = signal
 
-        # ── 3. Check existing position first ─────────────────────────────────
+        # ── 3. Check existing position first (PRESERVED) ─────────────────────
         if symbol in self._open:
             await self._manage_open_position(symbol, signal)
 
-        # ── 4. Entry logic ────────────────────────────────────────────────────
+        # ── 4. Entry logic (PRESERVED + setup quality gate added) ─────────────
         elif signal["signal"] in ("BUY", "SELL") and \
                 signal["confidence"] >= config.MIN_CONFIDENCE_SCORE and \
                 symbol not in self._open:
-            logger.info(
-                f"🎯 Entry candidate: {symbol} {signal['signal']} "
-                f"conf={signal['confidence']:.2f} price=${signal['price']:.2f}"
-            )
-            await self._enter(symbol, signal, df)
+
+            # NEW: Block low-quality setups — but let high-confidence signals through
+            # Setup quality < 50 AND ensemble confidence < 0.70 → skip
+            # (high ML confidence can override a marginal setup)
+            if not setup.get("tradeable", True) and signal["confidence"] < 0.70:
+                logger.info(
+                    f"⚠️  {symbol} {signal['signal']} blocked by setup filter: "
+                    f"setup={setup.get('setup_type','?')} quality={setup.get('quality',0):.0f} "
+                    f"issues={setup.get('quality_issues',[])} | "
+                    f"conf={signal['confidence']:.2f} < 0.70 override threshold"
+                )
+                signal["action"] = "SETUP_BLOCKED"
+            else:
+                logger.info(
+                    f"🎯 Entry candidate: {symbol} {signal['signal']} "
+                    f"conf={signal['confidence']:.2f} price=${signal['price']:.2f} "
+                    f"setup={setup.get('setup_type','?')} quality={setup.get('quality',0):.0f}"
+                )
+                await self._enter(symbol, signal, df)
+
         elif signal["signal"] in ("BUY", "SELL"):
             logger.debug(
                 f"Signal {signal['signal']} {symbol} blocked: "

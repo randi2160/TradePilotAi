@@ -33,7 +33,7 @@ class BotLoop:
         self.user_id       = user_id
 
         self._wl_builder   = DynamicWatchlistBuilder()
-        self._dynamic_mode = False
+        self._dynamic_mode = True  # Default ON — AI scans 100+ stocks for real movers
 
         # Always load from settings file so user changes persist
         self._settings     = SettingsManager()
@@ -130,6 +130,13 @@ class BotLoop:
         )
         self.status       = "running"
 
+        # ── Enable dynamic watchlist scanning by default ──
+        self._wl_builder.set_mode(self._dynamic_mode)
+        self._wl_builder.set_manual_list(self.watchlist)
+        logger.info(
+            f"bot.start[{uid_tag}] Dynamic watchlist: {'ON (AI scans 100+ stocks)' if self._dynamic_mode else 'OFF (manual only)'}"
+        )
+
         # ── Restore today's P&L from DB so restarts don't lose progress ──
         t0 = _time.time()
         self.tracker.load_from_db()
@@ -212,9 +219,10 @@ class BotLoop:
 
     async def _loop(self):
         await self._train_models()
-        last_train_day = datetime.now(ET).date()
-        last_wl_day    = None
+        last_train_day  = datetime.now(ET).date()
+        last_wl_day     = None
         last_harvest_ts = 0.0   # unix timestamp of last harvest tick
+        last_regime_ts  = 0.0   # unix timestamp of last regime refresh
 
         while self.status == "running":
             try:
@@ -228,6 +236,15 @@ class BotLoop:
                 if not self.broker.is_market_open():
                     await asyncio.sleep(60)
                     continue
+
+                # Refresh market regime every 5 minutes (SPY-based)
+                import time as _regime_t
+                if _regime_t.time() - last_regime_ts > 300:
+                    last_regime_ts = _regime_t.time()
+                    if self.engine:
+                        self.engine._refresh_regime()
+                        regime = (self.engine._current_regime or {}).get("regime", "?")
+                        logger.info(f"📊 Market regime: {regime}")
 
                 # Rebuild dynamic watchlist every 30 minutes
                 if self._dynamic_mode and self._wl_builder.needs_rebuild():
@@ -493,6 +510,9 @@ class BotLoop:
             "mode":             self.mode,
             "trading_mode":     self.trading_mode,
             "dynamic_watchlist": self._dynamic_mode,
+            "market_regime":    (self.engine._current_regime or {}).get("regime", "unknown") if self.engine else "unknown",
+            "regime_detail":    self.engine._current_regime if self.engine else None,
+            "ml_trained":       self.ensemble.is_trained if self.ensemble else False,
             "account":          account,
             "positions":        positions,
             "signals":          self.get_latest_signals(),
