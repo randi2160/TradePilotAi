@@ -113,14 +113,26 @@ function TradingApp() {
     return () => clearInterval(iv)
   }, [token])
 
-  // Compliance check — must be here before any conditional returns
+  // Compliance check — gate the dashboard behind required consents.
+  //
+  // Admin users (platform owners) bypass the flow — they wrote the docs,
+  // forcing them to click through in dev is wasted friction. Every other
+  // user has to accept risk_disclosure + terms_of_service + auto_trading
+  // before the dashboard renders.
+  //
+  // If the backend route fails for any reason we fail OPEN (let them in)
+  // rather than locking everyone out of their own data. The trade-off is
+  // conscious: availability > strict compliance on a transient error.
   useEffect(() => {
     if (!user) return
+    if (user.is_admin) {
+      setNeedsConsent(false)
+      return
+    }
     api.get('/compliance/status')
-      .then(r => setNeedsConsent(false))  // TEMP: disabled — add docs via admin first
-      .catch(() => setNeedsConsent(false))
+      .then(r => setNeedsConsent(!r.data?.onboarding_complete))
       .catch(() => setNeedsConsent(false)) // if route fails, don't block dashboard
-  }, [user?.id])
+  }, [user?.id, user?.is_admin])
 
   if (loading) return (
     <div className="min-h-screen bg-dark-900 flex items-center justify-center">

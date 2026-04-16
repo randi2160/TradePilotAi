@@ -35,8 +35,19 @@ class LiveModeBody(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_creds(user: User) -> dict:
-    """3-tier: saved DB creds → legacy alpaca fields → .env fallback."""
-    # 1. Saved JSON creds
+    """Load THIS user's saved broker creds — no cross-user fallback.
+
+    The old code had a tier-3 .env fallback that caused every user without
+    their own keys to see the admin's paper account. That was a data leak:
+    new signups saw real positions, equity, and P&L from whoever owns the
+    .env keys on the server. Now each user's dashboard is empty until they
+    connect a broker through the My Broker tab.
+
+    For system-level code paths that legitimately need shared market data
+    (the market scanner, the recovery broker on boot), use `config.ALPACA_*`
+    directly — those aren't user-scoped.
+    """
+    # 1. Saved JSON creds (primary path — set by POST /api/broker/connect)
     try:
         creds = json.loads(user.broker_creds or "{}")
         if creds and creds.get("api_key"):
@@ -44,13 +55,9 @@ def _load_creds(user: User) -> dict:
     except Exception:
         pass
 
-    # 2. Legacy alpaca_key fields
+    # 2. Legacy alpaca_key fields (users who connected before broker_creds existed)
     if user.alpaca_key and user.alpaca_secret:
         return {"api_key": user.alpaca_key, "api_secret": user.alpaca_secret}
-
-    # 3. .env file fallback — works out of the box
-    if config.ALPACA_API_KEY and config.ALPACA_SECRET_KEY:
-        return {"api_key": config.ALPACA_API_KEY, "api_secret": config.ALPACA_SECRET_KEY}
 
     return {}
 
@@ -72,7 +79,7 @@ def _resolve_broker_type(user: User) -> str:
 def _get_user_broker(user: User):
     creds = _load_creds(user)
     if not creds:
-        raise HTTPException(400, "No API keys found. Add ALPACA_API_KEY to your .env file or connect via My Broker tab.")
+        raise HTTPException(400, "Connect your broker first — go to the My Broker tab and add your Alpaca API keys.")
     broker_type = _resolve_broker_type(user)
     try:
         return get_broker(broker_type, creds)
@@ -89,19 +96,21 @@ async def list_brokers():
 
 @router.get("/status")
 async def broker_status(user: User = Depends(get_current_user)):
-    creds      = _load_creds(user)
-    using_env  = bool(not user.broker_connected and config.ALPACA_API_KEY)
-    broker_type = _resolve_broker_type(user)
+    # Report honestly: connected only if THIS user saved credentials.
+    # Previously we reported `connected=True` whenever the server had .env keys,
+    # which masked the fact that the user was seeing the admin's portfolio.
+    creds       = _load_creds(user)
     has_creds   = bool(creds)
+    broker_type = _resolve_broker_type(user)
     return {
         "broker_type":     broker_type,
-        "connected":       bool(user.broker_connected) or using_env,
-        "verified":        bool(user.broker_verified)  or using_env,
+        "connected":       bool(user.broker_connected) and has_creds,
+        "verified":        bool(user.broker_verified)  and has_creds,
         "live_mode":       bool(user.live_mode_enabled),
         "broker_name":     get_supported_brokers().get(broker_type, {}).get("name", broker_type),
         "has_credentials": has_creds,
-        "using_env_keys":  using_env,
-        "env_mode":        config.ALPACA_MODE if using_env else None,
+        "using_env_keys":  False,   # deprecated: per-user isolation now enforced
+        "env_mode":        None,
     }
 
 
