@@ -144,6 +144,7 @@ class BotLoop:
             f"bot.start[{uid_tag}] ✅ READY total=+{_time.time()-t_enter:.2f}s | "
             f"Broker={mode.upper()} | Trading={trading_mode.upper()} | "
             f"Restored P&L=${self.tracker.realized_pnl:.2f} | "
+            f"ML={'trained' if self.ensemble.is_trained else 'untrained (will train on first cycle)'} | "
             f"Watchlist={self.watchlist}"
         )
 

@@ -79,22 +79,37 @@ async def start_dual(
     user: User    = Depends(get_current_user),
     db:   Session = Depends(get_db),
 ):
+    import time as _t
+    t0 = _t.time()
+    logger.info(f"╔══ DUAL ENGINE START [uid={user.id}] ═══════════════════════════")
+
     # Per-user prerequisite: THIS user's main stock bot must be running.
     if not _user_bot_running(user.id):
+        logger.warning(f"║  Main bot not running for user {user.id} — aborting dual start")
         raise HTTPException(
             400,
             "Start the main bot first — go to ⚙️ Bot tab and click Start Bot",
         )
+    logger.info(f"║  [1] Main bot check passed ({_t.time()-t0:.2f}s)")
 
     mgr = get_manager(user.id)
 
+    t2 = _t.time()
     split = mgr.initialize(
         total_capital = user.capital,
         daily_goal    = user.daily_target_max,
         market_regime = body.market_regime,
         sentiment     = body.sentiment,
     )
+    logger.info(
+        f"║  [2] AI split computed ({_t.time()-t2:.2f}s) | "
+        f"capital=${user.capital} goal=${user.daily_target_max} "
+        f"scalper={split.get('scalper',{}).get('pct',0)}% "
+        f"bounce={split.get('bounce',{}).get('pct',0)}%"
+    )
+
     mgr.start_both()
+    logger.info(f"╚══ DUAL ENGINE READY in {_t.time()-t0:.2f}s ═════════════════════════")
 
     return {
         "status": "both engines started",

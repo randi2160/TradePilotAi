@@ -53,7 +53,8 @@ function CryptoEnginePanel({ settings }) {
     }
   }
 
-  if (savedMode === 'stocks_only' && !status?.crypto_running) return null
+  // Always show the crypto/hybrid panel so users can start it from any mode.
+  // When savedMode is 'stocks_only', clicking Start will auto-switch to 'hybrid'.
 
   const crypto  = status?.crypto
   const running = status?.crypto_running
@@ -87,7 +88,8 @@ function CryptoEnginePanel({ settings }) {
         <span className="text-xs text-gray-500 ml-1">
           {savedMode === 'hybrid'
             ? 'Hybrid · ' + Math.round((settings?.crypto_alloc_pct || 0.3) * 100) + '% crypto'
-            : 'Crypto Only'}
+            : savedMode === 'crypto_only' ? 'Crypto Only'
+            : 'Stocks Only · click Start to enable Hybrid'}
         </span>
         <button onClick={loadStatus} className="ml-auto p-1 text-gray-600 hover:text-white">
           <RefreshCw size={12} className={loading ? 'animate-spin' : ''}/>
@@ -145,7 +147,7 @@ function CryptoEnginePanel({ settings }) {
             className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-brand-500 hover:bg-brand-600 text-dark-900 font-bold rounded-xl text-sm disabled:opacity-50"
           >
             <Zap size={14}/>
-            {loading ? 'Starting…' : 'Start ' + (savedMode === 'hybrid' ? 'Hybrid' : 'Crypto') + ' Engine'}
+            {loading ? 'Starting…' : 'Start ' + (savedMode === 'crypto_only' ? 'Crypto' : 'Hybrid') + ' Engine'}
           </button>
         ) : (
           <button

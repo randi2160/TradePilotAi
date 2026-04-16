@@ -280,11 +280,27 @@ _crypto_running = False
 async def crypto_engine_loop():
     """Background loop that runs crypto/hybrid engine cycles when activated."""
     global _hybrid_engine, _crypto_running
-    logger.info("Crypto engine loop started (idle until activated)")
+    logger.info("🔄 Crypto engine loop started (idle until activated)")
+    _cycle_count = 0
     while True:
         try:
             if _hybrid_engine is not None and _crypto_running:
+                _cycle_count += 1
                 result = await _hybrid_engine.run_cycle()
+
+                # Log every 10th cycle or first 3 cycles for visibility
+                if _cycle_count <= 3 or _cycle_count % 10 == 0:
+                    crypto_state = "none"
+                    if result.get("crypto") and isinstance(result["crypto"], dict):
+                        crypto_state = result["crypto"].get("state", "unknown")
+                    ml_status = ""
+                    if _hybrid_engine.crypto_engine and hasattr(_hybrid_engine.crypto_engine, 'ensemble'):
+                        ens = _hybrid_engine.crypto_engine.ensemble
+                        ml_status = f" ml={'trained' if ens and ens.is_trained else 'off'}"
+                    logger.info(
+                        f"🔄 Crypto cycle #{_cycle_count} | mode={result.get('mode')} "
+                        f"state={crypto_state}{ml_status}"
+                    )
 
                 # Keep user context wired after lazy engine creation
                 if (_hybrid_engine.crypto_engine and
@@ -704,13 +720,23 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
             "before enabling the crypto/hybrid engine.")
 
     try:
+        import time as _t
+        t0 = _t.time()
         from strategy.hybrid_engine import HybridEngine
         from strategy.crypto_engine import CryptoPosition, EngineState
-        # Scope the hybrid engine to THIS user's stock bot + tracker so P&L
-        # and crypto allocation decisions are computed from this user's data
-        # only. If the user hasn't started their stock bot yet we still
-        # create their bot row (lazy) so the shared tracker is user-scoped.
+        logger.info(f"╔══ HYBRID ENGINE START [uid={user.id}] ═══════════════════════")
+        logger.info(f"║  mode={body.mode}  crypto_alloc={body.crypto_alloc:.0%}  after_hours={body.after_hours_crypto_alloc:.0%}")
+
+        # Step 1: Resolve user bot
+        t1 = _t.time()
         user_bot = get_user_bot(user)
+        has_ensemble = bool(getattr(user_bot, "ensemble", None))
+        ml_trained   = getattr(getattr(user_bot, "ensemble", None), "is_trained", False)
+        logger.info(f"║  [1] User bot resolved ({_t.time()-t1:.2f}s) | "
+                     f"broker={'✓' if broker else '✗'}  ensemble={'✓ trained' if ml_trained else '✓ untrained' if has_ensemble else '✗ none'}")
+
+        # Step 2: Build HybridEngine
+        t2 = _t.time()
         _hybrid_engine = HybridEngine(
             broker           = broker,
             settings         = settings,
@@ -722,20 +748,27 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
             ensemble         = getattr(user_bot, "ensemble", None),
         )
         _crypto_running = True
-        # Wire in user context for DB saves and activity feed
+        logger.info(f"║  [2] HybridEngine built ({_t.time()-t2:.2f}s) | "
+                     f"planner={'✓' if _hybrid_engine.planner else '✗'}  "
+                     f"ah_alloc={_hybrid_engine.after_hours_crypto_alloc:.0%}")
+
+        # Step 3: Wire user context
         if _hybrid_engine.crypto_engine:
             _hybrid_engine.crypto_engine._user_id  = user.id
             _hybrid_engine.crypto_engine._reporter = reporter
+            logger.info(f"║  [3] Crypto engine wired | user_id={user.id}")
+        else:
+            logger.info(f"║  [3] Crypto engine not yet created (lazy init on first cycle)")
 
-        # Reconcile any existing open Alpaca crypto positions
+        # Step 4: Reconcile existing Alpaca crypto positions
+        t4 = _t.time()
         try:
             positions = broker.get_positions()
             crypto_positions = [p for p in positions
                 if any(c in str(p.get("symbol","")).upper()
                        for c in ["BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH","XRP","SHIB"])]
             if crypto_positions:
-                logger.warning(f"Reconciling {len(crypto_positions)} existing crypto positions: "
-                    f"{[p.get('symbol') for p in crypto_positions]}")
+                logger.info(f"║  [4] Reconciling {len(crypto_positions)} open crypto positions ({_t.time()-t4:.2f}s)")
                 if _hybrid_engine.crypto_engine:
                     for p in crypto_positions:
                         sym_raw = str(p.get("symbol",""))
@@ -750,10 +783,14 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
                             entry=entry, stop=entry*0.98, target=entry*1.02,
                         )
                         _hybrid_engine.crypto_engine.open_positions[symbol] = pos
-                        logger.info(f"  Reconciled: {symbol} qty={qty} entry=${entry:.4f} upnl=${upnl:+.2f}")
+                        logger.info(f"║     → {symbol} qty={qty} entry=${entry:.4f} upnl=${upnl:+.2f}")
                     _hybrid_engine.crypto_engine.state = EngineState.POSITION_OPEN
+            else:
+                logger.info(f"║  [4] No existing crypto positions to reconcile ({_t.time()-t4:.2f}s)")
         except Exception as e:
-            logger.error(f"Position reconciliation error: {e}")
+            logger.error(f"║  [4] Position reconciliation error: {e}")
+
+        # Step 5: Save settings
         settings.set_engine_settings(
             settings._data.get("stop_new_trades_hour", 15),
             settings._data.get("stop_new_trades_minute", 30),
@@ -761,9 +798,11 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
             body.mode,
             body.crypto_alloc,
         )
-        logger.info(f"Crypto/Hybrid engine STARTED: mode={body.mode} alloc={body.crypto_alloc:.0%}")
+        total = _t.time() - t0
+        logger.info(f"║  [5] Settings saved")
+        logger.info(f"╚══ HYBRID ENGINE READY in {total:.2f}s ══════════════════════════")
     except Exception as e:
-        logger.error(f"Hybrid engine init: {e}")
+        logger.error(f"Hybrid engine init FAILED: {e}", exc_info=True)
         raise HTTPException(500, str(e))
 
     return {

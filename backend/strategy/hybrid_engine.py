@@ -71,9 +71,16 @@ class HybridEngine:
         try:
             from strategy.capital_planner import CapitalPlanner
             self.planner = CapitalPlanner(settings, broker, crypto_alloc_pct)
+            logger.info(f"HybridEngine.__init__: CapitalPlanner loaded ✓")
         except Exception as e:
             self.planner = None
-            logger.warning(f"CapitalPlanner unavailable: {e}")
+            logger.warning(f"HybridEngine.__init__: CapitalPlanner unavailable: {e}")
+
+        logger.info(
+            f"HybridEngine.__init__ complete | mode={mode} crypto_alloc={crypto_alloc_pct:.0%} "
+            f"user_id={user_id} ensemble={'✓' if ensemble else '✗'} "
+            f"ah_crypto={self.after_hours_crypto_alloc:.0%}"
+        )
 
     def _get_targets(self) -> dict:
         t = self.settings.get_targets()
@@ -190,6 +197,12 @@ class HybridEngine:
         targets = self._get_targets()
         # Use configured capital from settings, NOT Alpaca's full paper equity
         configured_capital = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
+        logger.info(
+            f"init_crypto_engine | capital=${configured_capital} crypto_pct={split['crypto_pct']:.0%} "
+            f"budget=${configured_capital * split['crypto_pct']:.2f} "
+            f"ensemble={'✓' if self.ensemble else '✗'} "
+            f"targets=min${targets['min']}/desired${targets['desired']}/stretch${targets['stretch']}"
+        )
         engine  = CryptoEngine(
             broker            = self.broker,
             target_min        = targets["min"],
