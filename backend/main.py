@@ -505,33 +505,12 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
         return {"status": "stocks_only_active", "crypto_running": False,
                 "message": "Crypto engine stopped. Stock engine continues normally."}
 
-    # Get broker — priority: 1) bot_loop if running, 2) user saved keys, 3) .env fallback
-    broker = bot_loop.broker
+    # SECURITY: per-user creds only — never share bot_loop.broker across users.
+    broker = _resolve_broker(user)
     if not broker:
-        try:
-            from broker.alpaca_client import AlpacaClient
-            from broker.broker_routes import _load_creds
-            import config as _cfg
-
-            # _load_creds checks: 1) user saved keys, 2) legacy alpaca fields, 3) .env fallback
-            creds = _load_creds(user)
-            if not creds.get("api_key"):
-                raise HTTPException(400,
-                    "NO_BROKER: No Alpaca API keys found. Add them to your .env file "
-                    "or connect your account in the My Broker tab.")
-
-            mode   = getattr(user, "alpaca_mode", None) or getattr(_cfg, "ALPACA_MODE", "paper")
-            broker = AlpacaClient(
-                paper      = (mode != "live"),
-                api_key    = creds["api_key"],
-                api_secret = creds["api_secret"],
-            )
-            logger.info(f"Crypto engine broker ready (mode={mode})")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(400, f"Broker connection failed: {e}. "
-                "Go to My Broker tab and reconnect your Alpaca account.")
+        raise HTTPException(400,
+            "NO_BROKER: Connect your Alpaca account in the My Broker tab "
+            "before enabling the crypto/hybrid engine.")
 
     try:
         from strategy.hybrid_engine import HybridEngine
@@ -640,6 +619,21 @@ async def run_crypto_cycle(user: User = Depends(get_current_user)):
 @app.get("/api/status",      tags=["Bot"])
 async def get_status(user: User = Depends(get_current_user)):
     s = bot_loop.get_live_summary()
+    # SECURITY: get_live_summary() includes account + positions from
+    # bot_loop.broker (the admin's broker). Overwrite with the caller's own
+    # account/positions so users never see each other's portfolios.
+    _usr_broker = _resolve_broker(user)
+    if _usr_broker:
+        try:
+            s["account"]   = _usr_broker.get_account()   or {}
+            s["positions"] = _usr_broker.get_positions() or []
+        except Exception as e:
+            logger.warning(f"status: per-user broker failed ({e})")
+            s["account"]   = {}
+            s["positions"] = []
+    else:
+        s["account"]   = {}
+        s["positions"] = []
     s["settings"] = settings.all()
     return s
 
@@ -650,10 +644,12 @@ async def retrain(user: User = Depends(get_current_user)):
 
 @app.post("/api/positions/close-all", tags=["Bot"])
 async def close_all(user: User = Depends(get_current_user)):
-    if bot_loop.broker:
-        bot_loop.broker.close_all_positions()
-        return {"status": "all positions closed"}
-    raise HTTPException(404, "Bot not running")
+    # SECURITY: per-user creds only — never close admin's positions.
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Connect your broker first")
+    broker.close_all_positions()
+    return {"status": "all positions closed"}
 
 class TradingModeBody(BaseModel):
     trading_mode: str
@@ -688,11 +684,13 @@ async def place_manual_trade(
     user: User    = Depends(get_current_user),
     db:   Session = Depends(get_db),
 ):
-    if not bot_loop.broker:
-        raise HTTPException(400, "Bot not started — start bot first to enable trading")
+    # SECURITY: per-user creds only — never place orders on admin's account.
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Connect your broker in the My Broker tab before placing trades")
 
     # Place the actual order
-    order = bot_loop.broker.place_market_order(body.symbol, body.qty, body.side)
+    order = broker.place_market_order(body.symbol, body.qty, body.side)
     if "error" in order:
         raise HTTPException(400, f"Order failed: {order['error']}")
 
@@ -734,11 +732,13 @@ async def close_manual_trade(
     user:   User    = Depends(get_current_user),
     db:     Session = Depends(get_db),
 ):
-    if not bot_loop.broker:
-        raise HTTPException(400, "Bot not started")
+    # SECURITY: per-user creds only — never close admin's positions.
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Connect your broker first")
 
-    result = bot_loop.broker.close_position(symbol.upper())
-    price  = bot_loop.broker.get_latest_price(symbol.upper())
+    result = broker.close_position(symbol.upper())
+    price  = broker.get_latest_price(symbol.upper())
 
     # Close in DB
     svc   = TradeService(db, user.id)
@@ -815,16 +815,8 @@ async def get_trades(user: User = Depends(get_current_user), db: Session = Depen
     # Also pull today's filled Alpaca orders so crypto trades always show up
     alpaca_results = []
     try:
-        broker = bot_loop.broker
-        if not broker:
-            from broker.alpaca_client import AlpacaClient
-            from broker.broker_routes import _load_creds
-            import config as _cfg
-            creds = _load_creds(user)
-            if creds.get("api_key"):
-                mode   = getattr(user, "alpaca_mode", None) or getattr(_cfg, "ALPACA_MODE", "paper")
-                broker = AlpacaClient(paper=(mode != "live"),
-                                      api_key=creds["api_key"], api_secret=creds["api_secret"])
+        # SECURITY: per-user creds only — never bot_loop.broker.
+        broker = _resolve_broker(user)
         if broker:
             from datetime import date
             today_str = str(date.today())
@@ -888,18 +880,24 @@ async def get_signals(user: User = Depends(get_current_user)):
 
 @app.get("/api/positions",      tags=["Data"])
 async def get_positions(user: User = Depends(get_current_user)):
-    return bot_loop.broker.get_positions() if bot_loop.broker else []
+    # SECURITY: per-user creds only — bot_loop.broker is the admin's client.
+    broker = _resolve_broker(user)
+    return broker.get_positions() if broker else []
 
 @app.get("/api/orders",         tags=["Data"])
 async def get_orders(user: User = Depends(get_current_user)):
-    return bot_loop.broker.get_orders(50) if bot_loop.broker else []
+    # SECURITY: per-user creds only — bot_loop.broker is the admin's client.
+    broker = _resolve_broker(user)
+    return broker.get_orders(50) if broker else []
 
 @app.get("/api/chart/{symbol}", tags=["Data"])
 async def get_chart(symbol: str, timeframe: str = "5Min", limit: int = 200,
                     user: User = Depends(get_current_user)):
-    if not bot_loop.broker:
-        raise HTTPException(400, "Start bot first")
-    df = bot_loop.broker.get_bars(symbol, timeframe, limit)
+    # SECURITY: per-user creds only.
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Connect your broker to load chart data")
+    df = broker.get_bars(symbol, timeframe, limit)
     if df.empty:
         return []
     df = df.reset_index()
@@ -941,18 +939,11 @@ async def get_pdt(user: User = Depends(get_current_user)):
     Full PDT compliance status from live Alpaca account.
     Returns daytrade_count, buying power, exempt status, and recommendations.
     """
-    if not bot_loop.broker:
-        # Try standalone client
-        try:
-            from broker.alpaca_client import AlpacaClient
-            import config as _cfg
-            _broker = AlpacaClient(_cfg.ALPACA_API_KEY,
-                                   getattr(_cfg, 'ALPACA_SECRET_KEY', ''),
-                                   getattr(_cfg, 'ALPACA_MODE', 'paper'))
-        except Exception:
-            return {"error": "Connect your broker to check PDT status"}
-    else:
-        _broker = bot_loop.broker
+    # SECURITY: always use the CALLER's own broker — never bot_loop.broker,
+    # which holds the admin's .env-backed client.
+    _broker = _resolve_broker(user)
+    if _broker is None:
+        return {"error": "Connect your broker to check PDT status"}
 
     try:
         from strategy.pdt_engine import PDTComplianceEngine
@@ -996,20 +987,46 @@ async def get_pdt(user: User = Depends(get_current_user)):
 
 from services import daily_pnl_service as _dpnl
 
-def _resolve_broker():
-    """Return a broker client if one is available — prefer the live bot loop's
-    broker so we pay the cost of one client, else fall back to a standalone."""
-    if bot_loop.broker:
-        return bot_loop.broker
+def _resolve_broker(user: User = None):
+    """Return a broker client scoped to the calling user's own credentials.
+
+    SECURITY (2026-04-16 incident): previously this returned `bot_loop.broker`
+    as a fast-path, which served the admin's .env-backed broker to any user
+    who hit a dashboard endpoint — causing new signups to see the admin's
+    portfolio, equity, and positions. We now ALWAYS load the caller's saved
+    credentials and return None if they haven't connected a broker.
+    """
+    if user is None:
+        return None
     try:
-        from broker.alpaca_client import AlpacaClient
+        from broker.broker_routes import _load_creds
+        from broker.alpaca_client  import AlpacaClient
+    except Exception as e:
+        logger.warning(f"dashboard: broker import failed ({e})")
+        return None
+
+    creds = _load_creds(user)
+    if not creds or not creds.get("api_key"):
+        return None
+
+    # Determine paper vs live from the user's stored broker_type (falls back
+    # to user.alpaca_mode, then paper).
+    broker_type = (getattr(user, "broker_type", None) or "").lower()
+    if "live" in broker_type:
+        paper = False
+    elif "paper" in broker_type:
+        paper = True
+    else:
+        paper = (getattr(user, "alpaca_mode", "paper") or "paper") != "live"
+
+    try:
         return AlpacaClient(
-            paper      = getattr(config, 'ALPACA_MODE', 'paper') == 'paper',
-            api_key    = config.ALPACA_API_KEY,
-            api_secret = getattr(config, 'ALPACA_SECRET_KEY', ''),
+            paper      = paper,
+            api_key    = creds.get("api_key"),
+            api_secret = creds.get("api_secret"),
         )
     except Exception as e:
-        logger.warning(f"dashboard: no broker available ({e})")
+        logger.warning(f"dashboard: broker build failed for user {user.id} ({e})")
         return None
 
 
@@ -1020,7 +1037,7 @@ async def dashboard_today(
 ):
     """Today's P&L snapshot — realized, unrealized, combined — plus the running
     compound total and %. Calling this refreshes the DailyPnL row from Alpaca."""
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     return _dpnl.get_today(db, user.id, broker=broker, refresh=True)
 
 
@@ -1038,7 +1055,7 @@ async def dashboard_history(
 @app.get("/api/dashboard/alpaca-snapshot", tags=["Dashboard"])
 async def dashboard_alpaca_snapshot(user: User = Depends(get_current_user)):
     """Live Alpaca account mirror — cash, equity, buying power, today's gain."""
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     if not broker:
         return {"connected": False, "error": "Connect your Alpaca account to see live balance."}
     try:
@@ -1073,7 +1090,7 @@ async def dashboard_force_snapshot(
     db:   Session = Depends(get_db),
 ):
     """Force an immediate snapshot — useful for manual 'refresh' buttons."""
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     row = _dpnl.snapshot_today(db, user.id, broker=broker)
     return _dpnl._row_to_dict(row)
 
@@ -1085,7 +1102,7 @@ async def dashboard_finalize_day(
 ):
     """Finalize today's row. The scheduler calls this at end-of-session; exposed
     here for manual triggering too."""
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     row = _dpnl.finalize_day(db, user.id, broker=broker)
     return _dpnl._row_to_dict(row)
 
@@ -1093,7 +1110,7 @@ async def dashboard_finalize_day(
 @app.get("/api/dashboard/positions-detail", tags=["Dashboard"])
 async def dashboard_positions_detail(user: User = Depends(get_current_user)):
     """Drill-down for the Open Positions tile — live positions with P&L."""
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     if not broker:
         return {"positions": [], "error": "Connect broker to see positions."}
     try:
@@ -1163,7 +1180,7 @@ async def protection_get_status(
     """One-shot status packet for the dashboard badge/banner. Includes live
     equity (from Alpaca, when available) and breach state."""
     live_equity = None
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     if broker is not None:
         try:
             acct = broker.get_account() or {}
@@ -1179,7 +1196,7 @@ async def protection_force_harvest(
     db:   Session = Depends(get_db),
 ):
     """Manual trigger — run the harvest scan now (e.g. from a UI button)."""
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     if broker is None:
         raise HTTPException(400, "Broker not connected — start bot or attach broker first.")
     return _prot.harvest_positions(db, user.id, broker)
@@ -1196,7 +1213,7 @@ async def protection_ladder_status(
     trail %, tier label, scale-out levels hit, and protected $ for each open
     position. Used by the dashboard to show how much of the unrealized gain is
     locked in by trails."""
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     if broker is None:
         return {
             "enabled":   False,
@@ -1213,7 +1230,7 @@ async def protection_ladder_tick(
 ):
     """Manual trigger — run one ladder tick now (peak update + trail exits +
     scale-outs). Normally called automatically every ~60s from the bot loop."""
-    broker = _resolve_broker()
+    broker = _resolve_broker(user)
     if broker is None:
         raise HTTPException(400, "Broker not connected — start bot or attach broker first.")
     return _ladder.run_ladder_tick(db, user.id, broker)
@@ -1225,9 +1242,11 @@ async def run_backtest(
     limit:  int   = 500,
     user:   User  = Depends(get_current_user),
 ):
-    if not bot_loop.broker:
-        raise HTTPException(400, "Start bot first to load market data")
-    df = bot_loop.broker.get_bars(symbol, "5Min", limit)
+    # SECURITY: per-user creds only.
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Connect your broker to load market data")
+    df = broker.get_bars(symbol, "5Min", limit)
     if df.empty:
         raise HTTPException(400, f"No data for {symbol}")
     from data.indicators import add_all_indicators
@@ -1267,7 +1286,9 @@ async def get_advice(force: bool = False, user: User = Depends(get_current_user)
     sentiment = await news_scanner.scan_watchlist(settings.get_watchlist())
     signals   = bot_loop.get_latest_signals()
     stats     = tracker.stats()
-    positions = bot_loop.broker.get_positions() if bot_loop.broker else []
+    # SECURITY: per-user positions only — never expose admin's portfolio.
+    _usr_broker = _resolve_broker(user)
+    positions = _usr_broker.get_positions() if _usr_broker else []
     return await ai_advisor.get_advice(scan, sentiment, signals, stats, positions, force=force)
 
 @app.get("/api/ai/watchlist-suggest", tags=["AI Advisor"])
@@ -1669,11 +1690,12 @@ async def daily_report(
     best_trade   = max((t.pnl or 0 for t in closed), default=0)
     worst_trade  = min((t.pnl or 0 for t in closed), default=0)
 
-    # Live unrealized from bot if running
+    # Live unrealized — use the CALLER's own broker, never the bot's.
     unrealized = 0.0
     positions  = []
-    if bot_loop.broker:
-        positions  = bot_loop.broker.get_positions()
+    _usr_broker = _resolve_broker(user)
+    if _usr_broker:
+        positions  = _usr_broker.get_positions() or []
         unrealized = sum(float(p.get("unrealized_pnl", 0)) for p in positions)
 
     # Merge with in-memory tracker (might have trades not yet saved)
@@ -1745,7 +1767,9 @@ async def get_events(limit: int = 50, event_type: str = None,
 @app.get("/api/report/live-activity", tags=["Reports"])
 async def live_activity(user: User = Depends(get_current_user)):
     stats     = tracker.stats()
-    positions = bot_loop.broker.get_positions() if bot_loop.broker else []
+    # SECURITY: per-user positions only.
+    _usr_broker = _resolve_broker(user)
+    positions = _usr_broker.get_positions() if _usr_broker else []
     signals   = bot_loop.get_latest_signals()
     return {
         "stats":     stats,
@@ -1791,9 +1815,10 @@ async def get_day_plan(user: User = Depends(get_current_user)):
     # Build a standalone plan if hybrid engine not running
     try:
         from strategy.capital_planner import CapitalPlanner
-        broker  = bot_loop.broker
+        # SECURITY: per-user creds only.
+        broker  = _resolve_broker(user)
         if not broker:
-            raise HTTPException(400, "Start the bot first")
+            raise HTTPException(400, "Connect your broker first")
         planner = CapitalPlanner(settings, broker,
                                   getattr(user, "crypto_alloc", 0.30))
         return planner.get_api_summary()
@@ -1804,13 +1829,15 @@ async def get_day_plan(user: User = Depends(get_current_user)):
 @app.get("/api/regime", tags=["Analysis"])
 async def get_regime(user: User = Depends(get_current_user)):
     """Get current market regime based on SPY analysis."""
-    if not bot_loop.broker:
-        raise HTTPException(400, "Start the bot first")
+    # SECURITY: per-user creds only.
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Connect your broker first")
     try:
         from data.regime_detector import RegimeDetector
         from data.indicators       import add_all_indicators
         import numpy as np
-        df = bot_loop.broker.get_bars("SPY", "5Min", 100)
+        df = broker.get_bars("SPY", "5Min", 100)
         if df.empty:
             raise HTTPException(400, "No SPY data available")
         df = add_all_indicators(df)
@@ -1840,19 +1867,21 @@ async def get_regime(user: User = Depends(get_current_user)):
 @app.get("/api/setup/{symbol}", tags=["Analysis"])
 async def get_setup(symbol: str, user: User = Depends(get_current_user)):
     """Classify the current setup for a symbol."""
-    if not bot_loop.broker:
-        raise HTTPException(400, "Start the bot first")
+    # SECURITY: per-user creds only.
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Connect your broker to analyze setups")
     try:
         from data.regime_detector   import RegimeDetector
         from data.vwap              import get_vwap_signal
         from data.indicators        import add_all_indicators
         from strategy.setup_classifier import SetupClassifier
 
-        df = bot_loop.broker.get_bars(symbol.upper(), "5Min", 100)
+        df = broker.get_bars(symbol.upper(), "5Min", 100)
         if df.empty:
             raise HTTPException(400, f"No data for {symbol}")
         df   = add_all_indicators(df)
-        spy  = bot_loop.broker.get_bars("SPY", "5Min", 100)
+        spy  = broker.get_bars("SPY", "5Min", 100)
         spy  = add_all_indicators(spy) if not spy.empty else df
 
         regime   = RegimeDetector().detect(spy)
@@ -1873,8 +1902,10 @@ async def get_setup(symbol: str, user: User = Depends(get_current_user)):
 @app.post("/api/rules/check/{symbol}", tags=["Analysis"])
 async def check_rules(symbol: str, user: User = Depends(get_current_user)):
     """Run all hard rules for a symbol and return pass/fail details."""
-    if not bot_loop.broker:
-        raise HTTPException(400, "Start the bot first")
+    # SECURITY: per-user creds only.
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Connect your broker to run rule checks")
     try:
         from data.regime_detector      import RegimeDetector
         from data.vwap                 import get_vwap_signal
@@ -1882,8 +1913,8 @@ async def check_rules(symbol: str, user: User = Depends(get_current_user)):
         from strategy.setup_classifier import SetupClassifier
         from strategy.hard_rules       import HardRulesEngine
 
-        df  = bot_loop.broker.get_bars(symbol.upper(), "5Min", 100)
-        spy = bot_loop.broker.get_bars("SPY", "5Min", 100)
+        df  = broker.get_bars(symbol.upper(), "5Min", 100)
+        spy = broker.get_bars("SPY", "5Min", 100)
         if df.empty:
             raise HTTPException(400, f"No data for {symbol}")
         df  = add_all_indicators(df)
@@ -1901,7 +1932,9 @@ async def check_rules(symbol: str, user: User = Depends(get_current_user)):
             "volume_ratio": float(last.get("volume_ratio", 1.0)),
         }
         setup  = SetupClassifier().classify(df, symbol.upper(), regime, vwap, indicators)
-        acct   = bot_loop.broker.get_account()
+        # SECURITY: pull equity/positions from the caller's own broker (already
+        # resolved above as `broker`), not bot_loop.broker.
+        acct   = broker.get_account()
         equity = float(acct.get("equity", user.capital)) if acct else user.capital
 
         rules  = HardRulesEngine().check_all(
@@ -1909,7 +1942,7 @@ async def check_rules(symbol: str, user: User = Depends(get_current_user)):
             vwap_info=vwap, regime=regime,
             daily_pnl=tracker.realized_pnl,
             capital=equity,
-            open_positions=len(bot_loop.broker.get_positions()),
+            open_positions=len(broker.get_positions() or []),
             daily_loss_limit=user.max_daily_loss,
         )
         return {**rules, "setup": setup, "regime": regime, "vwap": vwap}
@@ -2031,32 +2064,22 @@ async def ai_symbol_sentiment(
         from data.regime_detector   import RegimeDetector
         from data.vwap              import get_vwap_signal
 
-        if not bot_loop.broker:
-            # Try standalone client
-            try:
-                from broker.alpaca_client import AlpacaClient
-                import config as _cfg
-                if _cfg.ALPACA_API_KEY:
-                    _broker = AlpacaClient(_cfg.ALPACA_API_KEY,
-                                           getattr(_cfg, 'ALPACA_SECRET_KEY', ''),
-                                           getattr(_cfg, 'ALPACA_MODE', 'paper'))
-                else:
-                    raise Exception("No API key")
-            except Exception:
-                price = body.get("price") or 0
-                change = body.get("change_pct") or 0
-                return {
-                    "symbol":    symbol,
-                    "signal":    "HOLD",
-                    "sentiment": "neutral",
-                    "score":     50,
-                    "confidence": 45,
-                    "reasoning": "Connect your broker API keys to enable full live AI analysis with real chart data.",
-                    "entry":     None, "exit": None, "stop": None, "risk_reward": None,
-                    "indicators": {}, "key_levels": {},
-                }
-        else:
-            _broker = bot_loop.broker
+        # SECURITY: never reuse bot_loop.broker (admin's .env creds). Always
+        # use the caller's own credentials.
+        _broker = _resolve_broker(user)
+        if _broker is None:
+            price = body.get("price") or 0
+            change = body.get("change_pct") or 0
+            return {
+                "symbol":    symbol,
+                "signal":    "HOLD",
+                "sentiment": "neutral",
+                "score":     50,
+                "confidence": 45,
+                "reasoning": "Connect your broker API keys to enable full live AI analysis with real chart data.",
+                "entry":     None, "exit": None, "stop": None, "risk_reward": None,
+                "indicators": {}, "key_levels": {},
+            }
 
         # Get bars at multiple timeframes
         df1  = _broker.get_bars(symbol, "1Min",  50)
@@ -2202,22 +2225,9 @@ async def get_symbol_bars(
     import pandas as pd
     from datetime import datetime, timezone, timedelta
 
-    def _get_broker():
-        if bot_loop.broker:
-            return bot_loop.broker
-        # Standalone client when bot not running
-        try:
-            from broker.alpaca_client import AlpacaClient
-            import config
-            if config.ALPACA_API_KEY:
-                return AlpacaClient(config.ALPACA_API_KEY,
-                                    getattr(config, 'ALPACA_SECRET_KEY', ''),
-                                    getattr(config, 'ALPACA_MODE', 'paper'))
-        except Exception:
-            pass
-        return None
-
-    broker = _get_broker()
+    # SECURITY: always use the caller's own creds — never bot_loop.broker
+    # or .env fallback, both of which leak the admin's account.
+    broker = _resolve_broker(user)
     if not broker:
         return []
     try:

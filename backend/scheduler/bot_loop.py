@@ -55,7 +55,13 @@ class BotLoop:
         self.watchlist    = self._settings.get_watchlist()
         self.mode         = mode
         self.trading_mode = trading_mode
-        self.broker       = AlpacaClient(paper=(mode == "paper"))
+        # The bot loop runs a single shared trading session against the
+        # .env-configured admin/operator account. This is `system=True` so
+        # the AlpacaClient constructor allows the .env fallback — but NOTE:
+        # bot_loop.broker must NEVER be surfaced directly to end-user
+        # endpoints. Per-user requests must go through `_resolve_broker(user)`
+        # in main.py, which loads each user's saved credentials.
+        self.broker       = AlpacaClient(paper=(mode == "paper"), system=True)
         self.engine       = StrategyEngine(self.broker, self.tracker, self.risk, self.ensemble)
         self.status       = "running"
 

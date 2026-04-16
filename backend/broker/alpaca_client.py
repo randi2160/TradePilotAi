@@ -36,13 +36,36 @@ _TF_MAP = {
 
 
 class AlpacaClient:
-    def __init__(self, paper: bool = True, api_key: str = None, api_secret: str = None):
+    def __init__(self, paper: bool = True, api_key: str = None, api_secret: str = None,
+                 system: bool = False):
+        """
+        Instantiate an Alpaca client.
+
+        SECURITY: By default, callers MUST pass explicit credentials. We do NOT
+        silently fall back to .env — doing so previously caused per-user
+        endpoints to return the admin's portfolio to every unauthenticated
+        user (data leak incident 2026-04-16).
+
+        Only set `system=True` from trusted system-level code paths that have
+        no per-user context (e.g. the market scanner scanning public gainers).
+        """
         self.paper = paper
-        # Use passed credentials or fall back to .env
-        self.api_key    = api_key    or config.ALPACA_API_KEY
-        self.secret_key = api_secret or config.ALPACA_SECRET_KEY
-        key    = self.api_key
-        secret = self.secret_key
+        if api_key and api_secret:
+            key    = api_key
+            secret = api_secret
+        elif system:
+            # Explicit system context — OK to use shared .env keys for
+            # market-data-only operations. Never for account/positions.
+            key    = config.ALPACA_API_KEY
+            secret = config.ALPACA_SECRET_KEY
+        else:
+            raise ValueError(
+                "AlpacaClient requires per-user credentials. "
+                "Pass api_key/api_secret from the user's saved broker_creds, "
+                "or set system=True for trusted system-level market-data paths."
+            )
+        self.api_key    = key
+        self.secret_key = secret
         self.trading = TradingClient(
             api_key=key, secret_key=secret, paper=paper,
         )

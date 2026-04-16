@@ -44,15 +44,21 @@ def _get_setting(db: Session, key: str, default):
 
 
 def _get_account_info(user: User, db: Session) -> dict:
-    """Get live account info from Alpaca or fall back to user settings."""
+    """Get live account info from Alpaca or fall back to user settings.
+
+    SECURITY: per-user creds only — no .env fallback.
+    """
     try:
         from broker.broker_routes import _get_broker_creds
         from broker.alpaca_client import AlpacaClient
-        import config
-        creds = _get_broker_creds(user, db)
-        if creds:
-            client = AlpacaClient(creds["api_key"], creds["api_secret"],
-                                  getattr(user, "alpaca_mode", "paper"))
+        creds = _get_broker_creds(user)
+        if creds and creds.get("api_key"):
+            mode = getattr(user, "alpaca_mode", "paper")
+            client = AlpacaClient(
+                paper      = (mode != "live"),
+                api_key    = creds["api_key"],
+                api_secret = creds["api_secret"],
+            )
             return client.get_account()
     except Exception as e:
         logger.warning(f"Account fetch failed: {e}")
