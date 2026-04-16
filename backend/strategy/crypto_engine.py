@@ -142,7 +142,7 @@ class CryptoEngine:
         max_scalp_hold_min: int = 15,   # max hold before forced exit
         max_risk_pct:   float = 0.005,  # 0.5% risk per trade
         compound_mode:  bool  = True,
-        min_probability: float = 0.40,   # lowered from 0.60 — crypto is volatile enough
+        min_probability: float = 0.55,   # minimum edge — below 55% is coin-flip territory after fees
         stop_at_min_target: bool = False,
         max_positions:  int   = 2,
         user_id:        int   = None,
@@ -489,13 +489,33 @@ class CryptoEngine:
             units         = max_size / price if price > 0 else 0
             exp_profit    = units * expected_move
 
+            # ── Trend strength: EMA slope + higher-lows detection ──────
+            # A flat/declining 8-bar EMA slope means the short-term trend
+            # is dead or bearish — no business going long.
+            ema8_prev  = ema(closes[-31:-1], 8) if len(closes) > 31 else ema8
+            ema_slope  = (ema8 - ema8_prev) / ema8_prev * 100 if ema8_prev > 0 else 0.0
+            # Count lower-lows in last 5 bars (classic downtrend signal)
+            lower_lows = sum(1 for i in range(-4, 0) if lows[i] < lows[i-1])
+
+            # ── Hard gate: do NOT buy into a clear downtrend ───────────
+            # If EMA8 < EMA21 AND momentum is negative AND we see 3+ lower
+            # lows in the last 5 bars, this is a falling knife. Mark invalid.
+            downtrend = (not trend_up) and (momentum < 0) and (lower_lows >= 2)
+
             # Composite score
             score = 0
             score += min(30, max(0, momentum * 5 + 15))        # momentum (0-30)
             score += min(20, vol_ratio * 10)                    # volume (0-20)
-            score += 15 if trend_up else 0                      # trend (0-15)
-            score += min(20, vol_score / 5)                     # volatility (0-20)
+            score += 20 if trend_up else 0                      # trend (0-20) — weighted MORE
+            score += min(15, vol_score / 6.67)                  # volatility (0-15)
             score += 15 if exp_profit >= self.min_scalp_profit else 0  # profitability (0-15)
+
+            # Penalize downtrend and negative momentum harder
+            if not trend_up:
+                score -= 10
+            if momentum < -0.5:
+                score -= 10  # falling fast — extra penalty
+            score = max(0, score)
 
             # Probability estimate
             probability = min(0.95, max(0.3, score / 100))
@@ -510,9 +530,13 @@ class CryptoEngine:
                 "atr":           round(atr, 6),
                 "atr_pct":       round(atr_pct, 3),
                 "trend_up":      trend_up,
+                "ema_slope":     round(ema_slope, 3),
+                "lower_lows":    lower_lows,
+                "downtrend":     downtrend,
                 "expected_move": round(expected_move, 6),
                 "exp_profit":    round(exp_profit, 2),
-                "valid":         probability >= self.min_probability and exp_profit > 0,
+                # HARD GATE: invalid if downtrend OR below confidence threshold
+                "valid":         (not downtrend) and probability >= self.min_probability and exp_profit > 0,
             }
 
         except Exception as e:
@@ -542,9 +566,11 @@ class CryptoEngine:
         if expected_move <= 0:
             expected_move = price * 0.005
 
-        # Stop must be at least 0.1% below entry (Alpaca minimum)
-        min_stop_dist = max(price * 0.001, 0.01)
-        stop_dist     = max(atr * 1.5, min_stop_dist)
+        # Stop at 2× ATR — wider than old 1.5× to avoid noise stopouts.
+        # BTC can easily move 1.5× ATR on a random 1-min candle; 2× gives
+        # breathing room while still capping risk.
+        min_stop_dist = max(price * 0.002, 0.01)  # minimum 0.2% (was 0.1%)
+        stop_dist     = max(atr * 2.0, min_stop_dist)
         stop          = round(price - stop_dist, 6)
         target        = round(price + expected_move, 6)
 
@@ -685,15 +711,18 @@ class CryptoEngine:
         tradeable = filtered if filtered else tradeable  # fallback if all filtered
 
         # ── Global loss streak guard ──────────────────────────────────────
-        # After 3 consecutive losses, tighten confidence requirement
+        # After consecutive losses, tighten confidence requirement progressively
         min_conf = self.min_probability
         if self.consecutive_losses >= 5:
-            logger.info(f"⚠️  {self.consecutive_losses} consecutive losses — pausing 10 min")
-            import time; time.sleep(600)
+            logger.info(f"⚠️  {self.consecutive_losses} consecutive losses — pausing 15 min to let market settle")
+            import time; time.sleep(900)
             self.consecutive_losses = 0
         elif self.consecutive_losses >= 3:
-            min_conf = max(self.min_probability, 0.58)  # raise bar after 3 losses
+            min_conf = max(self.min_probability, 0.65)  # 65% bar after 3 losses — don't trade noise
             logger.info(f"⚠️  {self.consecutive_losses} losses in a row — raising confidence to {min_conf:.0%}")
+        elif self.consecutive_losses >= 2:
+            min_conf = max(self.min_probability, 0.60)
+            logger.info(f"⚠️  {self.consecutive_losses} losses — raising confidence to {min_conf:.0%}")
 
         # Valid = meets confidence threshold (raised after loss streaks)
         valid_tradeable = [c for c in tradeable if c.get("valid") and
@@ -703,8 +732,8 @@ class CryptoEngine:
             # Only pick fallback if confidence streak is clean
             if self.consecutive_losses < 2:
                 best_available = sorted(tradeable, key=lambda x: x["score"], reverse=True)[0]
-                # Raise the fallback score bar too — don't trade noise
-                if best_available.get("score", 0) >= 40:
+                # Raise the fallback score bar — 60+ means real setup, not noise
+                if best_available.get("score", 0) >= 60:
                     logger.info(
                         f"🎯 No coin meets threshold — trading best available: "
                         f"{best_available.get('ticker')} score={best_available.get('score',0):.0f}"
@@ -798,20 +827,23 @@ class CryptoEngine:
             self.state = EngineState.FUNDS_REFRESHING
             self.refresh_account()
 
-            # Record position
+            # Record position — use actual_price (fill), NOT best["price"]
+            # (scanner cache). best["price"] was the market price when the
+            # scanner ranked this coin — could be minutes stale by the time
+            # the order fills. actual_price is from Alpaca's filled_avg_price.
             self.state = EngineState.POSITION_OPEN
             pos = CryptoPosition(
                 symbol   = symbol,
                 side     = "BUY",
                 qty      = qty,
-                entry    = best["price"],
+                entry    = actual_price,
                 stop     = stop,
                 target   = target,
                 order_id = order_id,
             )
             self.open_positions[symbol] = pos
             self.trades_today += 1
-            logger.info(f"✅ Crypto position: {symbol} qty={qty} entry=${best['price']:.4f} target=${target:.4f} stop=${stop:.4f}")
+            logger.info(f"✅ Crypto position: {symbol} qty={qty} entry=${actual_price:.4f} target=${target:.4f} stop=${stop:.4f}")
 
             # ── Save to database + activity feed ─────────────────────────
             try:
@@ -824,7 +856,7 @@ class CryptoEngine:
                     symbol       = ticker,
                     side         = "BUY",
                     qty          = qty,
-                    entry_price  = float(best["price"]),
+                    entry_price  = float(actual_price),
                     stop_loss    = float(stop),
                     take_profit  = float(target),
                     confidence   = float(best.get("probability", 0)),
@@ -836,7 +868,7 @@ class CryptoEngine:
                 # Log to activity feed
                 _reporter = getattr(self, '_reporter', None)
                 if _reporter:
-                    _reporter.log_entry(ticker, "BUY", qty, float(best["price"]),
+                    _reporter.log_entry(ticker, "BUY", qty, float(actual_price),
                                         float(stop), float(target), float(best.get("probability", 0)))
             except Exception as e:
                 logger.warning(f"Crypto DB save error: {e}")
