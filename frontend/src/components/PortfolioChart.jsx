@@ -1,99 +1,144 @@
 import { useEffect, useState } from 'react'
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ResponsiveContainer } from 'recharts'
-import { getEquityHistory } from '../services/api'
+import {
+  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, ReferenceLine, ResponsiveContainer, Cell, Legend,
+} from 'recharts'
+import { getDashboardHistory, getDashboardToday } from '../services/api'
 
+// Ranges kept as user requested. 1H/4H/1D collapse to "today"; 7D shows last 7 sessions.
 const RANGES = [
-  { label: '1H',  hours: 1  },
-  { label: '4H',  hours: 4  },
-  { label: '1D',  hours: 24 },
-  { label: '7D',  hours: 168 },
+  { label: '1H', days: 1 },
+  { label: '4H', days: 1 },
+  { label: '1D', days: 1 },
+  { label: '7D', days: 7 },
 ]
 
-function CustomTooltip({ active, payload, capital }) {
+function money(v, digits = 2) {
+  const n = parseFloat(v) || 0
+  return n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+}
+
+function cls(...a) { return a.filter(Boolean).join(' ') }
+
+function CustomTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
-  const val   = payload[0].value
-  const pnl   = val - capital
-  const pct   = ((pnl / capital) * 100).toFixed(2)
-  const color = pnl >= 0 ? '#00d4aa' : '#ef4444'
+  const p = payload[0].payload
   return (
-    <div className="bg-dark-800 border border-dark-600 rounded-lg p-3 text-sm shadow-xl">
-      <p className="text-gray-400 text-xs mb-1">{payload[0].payload.label}</p>
-      <p className="font-bold text-white">${val.toLocaleString('en-US', {minimumFractionDigits:2})}</p>
-      <p style={{ color }} className="font-medium">
-        {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} ({pnl >= 0 ? '+' : ''}{pct}%)
-      </p>
+    <div className="bg-dark-800 border border-dark-600 rounded-lg p-3 text-xs shadow-xl min-w-[180px]">
+      <p className="text-gray-400 mb-1">{p.label}</p>
+      <div className="space-y-1">
+        <div className="flex justify-between gap-3">
+          <span className="text-gray-500">Realized</span>
+          <span className={p.realized >= 0 ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
+            {p.realized >= 0 ? '+' : ''}${money(p.realized)}
+          </span>
+        </div>
+        {(p.unrealized || 0) !== 0 && (
+          <div className="flex justify-between gap-3">
+            <span className="text-gray-500">Unrealized</span>
+            <span className={p.unrealized >= 0 ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
+              {p.unrealized >= 0 ? '+' : ''}${money(p.unrealized)}
+            </span>
+          </div>
+        )}
+        <div className="flex justify-between gap-3 border-t border-dark-600 pt-1">
+          <span className="text-gray-400">Compound</span>
+          <span className={p.compound >= 0 ? 'text-brand-400 font-bold' : 'text-red-400 font-bold'}>
+            {p.compound >= 0 ? '+' : ''}${money(p.compound)}
+          </span>
+        </div>
+        <div className="flex justify-between gap-3 text-gray-500">
+          <span>Trades</span>
+          <span className="text-white">{p.trades} · {p.wins} W / {p.losses} L</span>
+        </div>
+      </div>
     </div>
   )
 }
 
 export default function PortfolioChart({ capital = 5000 }) {
-  const [data,    setData]    = useState([])
-  const [range,   setRange]   = useState(24)
+  const [history, setHistory] = useState([])
+  const [today,   setToday]   = useState(null)
+  const [range,   setRange]   = useState(RANGES[3])   // default 7D
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => { load() }, [range])
-
-  // Simulate live tick every 5 seconds if bot is running
+  useEffect(() => { load() /* eslint-disable-next-line */ }, [range])
   useEffect(() => {
-    const iv = setInterval(load, 30000)
+    const iv = setInterval(load, 15000)
     return () => clearInterval(iv)
+    // eslint-disable-next-line
   }, [range])
 
   async function load() {
     setLoading(true)
     try {
-      const raw = await getEquityHistory(range)
-      const formatted = raw.map(p => ({
-        time:  new Date(p.time).getTime(),
-        value: p.value,
-        label: new Date(p.time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}),
-      }))
-      setData(formatted)
-    } catch {
-      // show flat line at capital if no data
-      setData([
-        { time: Date.now() - 3600000, value: capital, label: '1h ago' },
-        { time: Date.now(),           value: capital, label: 'Now'    },
+      const [hist, tod] = await Promise.all([
+        getDashboardHistory(range.days).catch(() => []),
+        getDashboardToday().catch(() => null),
       ])
+      setHistory(Array.isArray(hist) ? hist : [])
+      setToday(tod)
     } finally {
       setLoading(false)
     }
   }
 
-  const latest   = data[data.length - 1]?.value ?? capital
-  const earliest = data[0]?.value               ?? capital
-  const pnl      = latest - capital
-  const pct      = ((pnl / capital) * 100).toFixed(2)
-  const isUp     = pnl >= 0
-  const color    = isUp ? '#00d4aa' : '#ef4444'
-  const minVal   = Math.min(...data.map(d => d.value), capital) * 0.999
-  const maxVal   = Math.max(...data.map(d => d.value), capital) * 1.001
+  // Merge today's live row on top of history (history may or may not include it)
+  const byDate = new Map()
+  for (const row of history) byDate.set(row.trade_date, row)
+  if (today?.trade_date) byDate.set(today.trade_date, { ...byDate.get(today.trade_date), ...today })
+
+  const rows = [...byDate.values()].sort((a, b) => a.trade_date.localeCompare(b.trade_date))
+
+  // Shape for Recharts: one entry per day with realized, unrealized, compound, counts
+  const chartData = rows.map(r => ({
+    label:      r.trade_date,
+    realized:   parseFloat(r.realized_pnl   || 0),
+    unrealized: parseFloat(r.unrealized_pnl || 0),
+    compound:   parseFloat(r.compound_total || 0),
+    trades:     parseInt(r.trade_count || 0, 10),
+    wins:       parseInt(r.win_count   || 0, 10),
+    losses:     parseInt(r.loss_count  || 0, 10),
+  }))
+
+  // Header numbers come from today's row (the latest truth)
+  const ending   = parseFloat(today?.ending_equity  || 0) || capital
+  const compound = parseFloat(today?.compound_total || 0)
+  const compPct  = parseFloat(today?.compound_pct   || 0)
+  const todayTotal = parseFloat(today?.total_pnl    || 0)
+  const up         = todayTotal >= 0
+  const cUp        = compound   >= 0
+
+  // Nothing to chart yet
+  const empty = chartData.length === 0 || chartData.every(d => !d.realized && !d.unrealized && !d.compound)
 
   return (
     <div className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">
       {/* Header */}
-      <div className="flex justify-between items-start">
+      <div className="flex justify-between items-start flex-wrap gap-3">
         <div>
-          <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Portfolio Value</p>
-          <p className="text-3xl font-black text-white">
-            ${latest.toLocaleString('en-US', {minimumFractionDigits:2})}
-          </p>
-          <p className={`text-sm font-semibold mt-0.5 ${isUp ? 'text-green-400' : 'text-red-400'}`}>
-            {isUp ? '▲' : '▼'} {isUp ? '+' : ''}${pnl.toFixed(2)} ({isUp ? '+' : ''}{pct}%)
-          </p>
+          <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Portfolio Equity</p>
+          <p className="text-3xl font-black text-white">${money(ending)}</p>
+          <div className="flex gap-3 mt-1 flex-wrap text-sm">
+            <span className={up ? 'text-green-400' : 'text-red-400'}>
+              {up ? '▲ +' : '▼ '}${money(todayTotal)} today
+            </span>
+            <span className="text-gray-600">·</span>
+            <span className={cls('font-semibold', cUp ? 'text-green-400' : 'text-red-400')}>
+              Since start: {cUp ? '+' : ''}${money(compound)} ({cUp ? '+' : ''}{compPct.toFixed(2)}%)
+            </span>
+          </div>
         </div>
 
-        {/* Range selector */}
         <div className="flex gap-1">
           {RANGES.map(r => (
             <button
               key={r.label}
-              onClick={() => setRange(r.hours)}
-              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                range === r.hours
+              onClick={() => setRange(r)}
+              className={cls('px-2.5 py-1 rounded text-xs font-medium transition-colors',
+                range.label === r.label
                   ? 'bg-brand-500 text-dark-900'
-                  : 'bg-dark-700 text-gray-400 hover:bg-dark-600'
-              }`}
+                  : 'bg-dark-700 text-gray-400 hover:bg-dark-600')}
             >
               {r.label}
             </button>
@@ -104,23 +149,18 @@ export default function PortfolioChart({ capital = 5000 }) {
       {/* Chart */}
       <div className="relative">
         {loading && (
-          <div className="absolute inset-0 flex items-center justify-center z-10">
+          <div className="absolute top-0 right-0 z-10">
             <span className="text-brand-500 text-xs animate-pulse">Updating…</span>
           </div>
         )}
-        {data.length < 2 ? (
-          <div className="flex items-center justify-center h-48 text-gray-500 text-sm">
-            Start the bot to record portfolio history
+        {empty ? (
+          <div className="flex flex-col items-center justify-center h-48 text-gray-500 text-sm gap-2">
+            <span className="text-2xl">📈</span>
+            <p>No activity yet — start the bot to build your equity history.</p>
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={data} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id="equity" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor={color} stopOpacity={0.3} />
-                  <stop offset="95%" stopColor={color} stopOpacity={0}   />
-                </linearGradient>
-              </defs>
+          <ResponsiveContainer width="100%" height={260}>
+            <ComposedChart data={chartData} margin={{ top: 10, right: 15, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
               <XAxis
                 dataKey="label"
@@ -129,42 +169,72 @@ export default function PortfolioChart({ capital = 5000 }) {
                 axisLine={false}
                 interval="preserveStartEnd"
               />
+              {/* Left axis: daily P&L (bars) */}
               <YAxis
-                domain={[minVal, maxVal]}
+                yAxisId="pnl"
                 tick={{ fill: '#6b7280', fontSize: 10 }}
                 tickLine={false}
                 axisLine={false}
-                tickFormatter={v => `$${(v/1000).toFixed(1)}k`}
+                tickFormatter={v => `$${v >= 1000 || v <= -1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(0)}`}
+                width={50}
+              />
+              {/* Right axis: compound cumulative (line) */}
+              <YAxis
+                yAxisId="compound"
+                orientation="right"
+                tick={{ fill: '#00d4aa', fontSize: 10 }}
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={v => `$${v >= 1000 || v <= -1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(0)}`}
                 width={55}
               />
-              <Tooltip content={<CustomTooltip capital={capital} />} />
-              <ReferenceLine y={capital} stroke="#374151" strokeDasharray="4 2" />
-              <Area
-                type="monotone"
-                dataKey="value"
-                stroke={color}
-                strokeWidth={2}
-                fill="url(#equity)"
-                dot={false}
-                activeDot={{ r: 4, fill: color }}
+              <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(99,102,241,0.08)' }} />
+              <ReferenceLine y={0} yAxisId="pnl" stroke="#374151" />
+              <Legend
+                verticalAlign="top"
+                height={24}
+                iconType="circle"
+                wrapperStyle={{ fontSize: 11, color: '#9ca3af' }}
               />
-            </AreaChart>
+              {/* Daily P&L bars — green if positive, red if negative */}
+              <Bar yAxisId="pnl" dataKey="realized" name="Realized/day" radius={[3, 3, 0, 0]}>
+                {chartData.map((d, i) => (
+                  <Cell key={i} fill={d.realized >= 0 ? '#00d4aa' : '#ef4444'} fillOpacity={0.85} />
+                ))}
+              </Bar>
+              {/* Cumulative compound line */}
+              <Line
+                yAxisId="compound"
+                type="monotone"
+                dataKey="compound"
+                name="Compound total"
+                stroke="#6366f1"
+                strokeWidth={2.5}
+                dot={{ r: 3, fill: '#6366f1' }}
+                activeDot={{ r: 5 }}
+              />
+            </ComposedChart>
           </ResponsiveContainer>
         )}
       </div>
 
-      {/* Stats row */}
-      <div className="grid grid-cols-3 gap-3 pt-1 border-t border-dark-600">
-        {[
-          { label: 'Starting Capital', value: `$${capital.toLocaleString()}` },
-          { label: 'Current Value',    value: `$${latest.toLocaleString('en-US',{minimumFractionDigits:2})}` },
-          { label: 'Total Return',     value: `${isUp?'+':''}${pct}%`, color },
-        ].map(({ label, value, color: c }) => (
-          <div key={label} className="text-center">
-            <p className="text-xs text-gray-500">{label}</p>
-            <p className="text-sm font-bold" style={{ color: c || '#fff' }}>{value}</p>
-          </div>
-        ))}
+      {/* Stats row — now sourced from persisted DailyPnL so Current Value and
+          Total Return reflect reality even before the chart has history. */}
+      <div className="grid grid-cols-3 gap-3 pt-2 border-t border-dark-600">
+        <div className="text-center">
+          <p className="text-xs text-gray-500">Starting Capital</p>
+          <p className="text-sm font-bold text-white">${money(capital, 0)}</p>
+        </div>
+        <div className="text-center">
+          <p className="text-xs text-gray-500">Current Value</p>
+          <p className="text-sm font-bold text-white">${money(ending)}</p>
+        </div>
+        <div className="text-center">
+          <p className="text-xs text-gray-500">Total Return</p>
+          <p className={cls('text-sm font-bold', cUp ? 'text-green-400' : 'text-red-400')}>
+            {cUp ? '+' : ''}{compPct.toFixed(2)}%
+          </p>
+        </div>
       </div>
     </div>
   )

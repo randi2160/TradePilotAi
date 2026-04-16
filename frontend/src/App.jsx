@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { AuthProvider, useAuth, api } from './hooks/useAuth'
 import { useWebSocket }               from './hooks/useWebSocket'
-import { getTrades, addSymbol }       from './services/api'
+import { getTrades, addSymbol, getDashboardToday } from './services/api'
 import LoginPage            from './components/LoginPage'
 import Dashboard            from './components/Dashboard'
 import ChartView            from './components/ChartView'
@@ -37,6 +37,7 @@ import StockBoard         from './components/StockBoard'
 import BillingTab         from './components/BillingTab'
 import AlertBell, { AIRefreshBadge } from './components/AlertBell'
 import DailyAdvisor, { DailyPicksMini } from './components/DailyAdvisor'
+import AlpacaAccountPanel from './components/AlpacaAccountPanel'
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
@@ -78,6 +79,9 @@ function TradingApp() {
   const [trades,       setTrades]       = useState([])
   const [activeSymbol, setActiveSymbol] = useState(null)
   const [boardSymbol,  setBoardSymbol]  = useState(null)
+  // Persistent daily P&L — survives backend restart because it reads from the
+  // `daily_pnl` table rather than the bot's in-memory tracker.
+  const [dayPnl,       setDayPnl]       = useState(null)
 
   useEffect(() => {
     const handler = (e) => setTab(e.detail)
@@ -97,6 +101,15 @@ function TradingApp() {
     if (!token) return
     getTrades().then(setTrades).catch(() => {})
     const iv = setInterval(() => getTrades().then(setTrades).catch(() => {}), 10000)
+    return () => clearInterval(iv)
+  }, [token])
+
+  // Poll today's persisted P&L — independent of whether the bot is running.
+  useEffect(() => {
+    if (!token) return
+    const load = () => getDashboardToday().then(setDayPnl).catch(() => {})
+    load()
+    const iv = setInterval(load, 5000)
     return () => clearInterval(iv)
   }, [token])
 
@@ -147,7 +160,12 @@ function TradingApp() {
   const signals     = data?.signals ?? []
   const pending     = data?.pending_trades ?? []
   const tradingMode = data?.trading_mode ?? 'auto'
-  const equity      = capital + pnl
+  // Prefer persisted DailyPnL values so the header survives a backend restart.
+  // Falls back to WebSocket tracker if DB snapshot hasn't loaded yet.
+  const realizedToday   = parseFloat(dayPnl?.realized_pnl   ?? data?.realized_pnl ?? 0) || 0
+  const unrealizedToday = parseFloat(dayPnl?.unrealized_pnl ?? 0) || 0
+  const totalToday      = parseFloat(dayPnl?.total_pnl      ?? (realizedToday + unrealizedToday)) || 0
+  const equity          = parseFloat(dayPnl?.ending_equity  ?? (capital + pnl)) || (capital + pnl)
 
   async function handleAddToWatchlist(symbol) {
     try { await addSymbol(symbol) } catch {}
@@ -162,15 +180,27 @@ function TradingApp() {
         <div className="hidden sm:block">
           <img src="/logo.svg" alt="Morviq AI — AI That Trades. Wealth That Grows." className="h-8 w-auto"/>
         </div>
-        <div className={`px-3 py-1 rounded-full text-sm font-bold ${pnl >= 0 ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>
-          {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} today
+        {/* Today settled (realized) — persists across restart via DailyPnL table */}
+        <div title="Realized P&L — settled closed trades today"
+          className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 ${realizedToday >= 0 ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>
+          <span className="text-[10px] opacity-70 uppercase tracking-wide hidden sm:inline">Today</span>
+          <span>{realizedToday >= 0 ? '+' : ''}${realizedToday.toFixed(2)}</span>
           {cryptoPnl !== 0 && (
-            <span className="text-xs ml-1 opacity-70">
+            <span className="text-[10px] ml-1 opacity-70">
               (₿{cryptoPnl >= 0 ? '+' : ''}{cryptoPnl.toFixed(2)})
             </span>
           )}
         </div>
-        <div className="hidden md:flex items-center gap-1 bg-dark-700 px-3 py-1 rounded-full text-xs text-gray-300">
+        {/* Unrealized (open positions floating) — only show when non-zero */}
+        {unrealizedToday !== 0 && (
+          <div title="Unrealized P&L \u2014 open positions, not yet closed"
+            className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 border ${unrealizedToday >= 0 ? 'bg-green-900/20 text-green-400 border-green-800/40' : 'bg-red-900/20 text-red-400 border-red-800/40'}`}>
+            <span className="text-[10px] opacity-70 uppercase tracking-wide hidden sm:inline">Unreal</span>
+            <span>{unrealizedToday >= 0 ? '+' : ''}${unrealizedToday.toFixed(2)}</span>
+          </div>
+        )}
+        <div className="hidden md:flex items-center gap-1 bg-dark-700 px-3 py-1 rounded-full text-xs text-gray-300"
+          title="Current portfolio equity (from Alpaca)">
           💼 ${equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}
         </div>
         <div className={`hidden sm:flex items-center gap-1 px-2 py-1 rounded-full text-xs font-bold ${tradingMode === 'auto' ? 'bg-brand-500/20 text-brand-400 border border-brand-500/40' : 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/40'}`}>
@@ -241,17 +271,19 @@ function TradingApp() {
       <main className="flex-1 max-w-screen-xl w-full mx-auto p-4 md:p-6 overflow-auto">
         {tab === 'dashboard'   && (
           <div className="space-y-5">
+            {/* Chart full-width on top */}
             <PortfolioChart capital={capital}/>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-              {/* Main dashboard info */}
-              <div className="lg:col-span-2">
-                <Dashboard data={data}/>
-              </div>
-              {/* Daily picks mini card */}
+
+            {/* Alpaca account mirror + Daily picks, side by side */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <AlpacaAccountPanel/>
               <div className="bg-dark-800 border border-dark-600 rounded-2xl p-4">
                 <DailyPicksMini onNavigate={setTab}/>
               </div>
             </div>
+
+            {/* Main dashboard stats, engines, signals, positions */}
+            <Dashboard data={data}/>
           </div>
         )}
         {tab === 'daily'       && <DailyAdvisor/>}

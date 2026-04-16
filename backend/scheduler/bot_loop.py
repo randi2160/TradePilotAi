@@ -80,6 +80,32 @@ class BotLoop:
                 pass
         if self.engine:
             await self.engine.close_all_eod()
+        # Finalize today's DailyPnL rows for any user with activity today
+        try:
+            from database.database  import SessionLocal
+            from database.models    import Trade, DailyPnL
+            from services           import daily_pnl_service as _dpnl
+            from datetime           import date
+            today_str = date.today().strftime("%Y-%m-%d")
+            with SessionLocal() as db:
+                # Collect user_ids that either traded today or already have a
+                # row started for today — so we don't miss anyone.
+                active_user_ids = {
+                    uid for (uid,) in db.query(Trade.user_id)
+                                        .filter(Trade.trade_date == today_str)
+                                        .distinct().all()
+                } | {
+                    uid for (uid,) in db.query(DailyPnL.user_id)
+                                        .filter(DailyPnL.trade_date == today_str)
+                                        .distinct().all()
+                }
+                for uid in active_user_ids:
+                    try:
+                        _dpnl.finalize_day(db, uid, broker=self.broker)
+                    except Exception as e:
+                        logger.warning(f"finalize_day({uid}) skipped: {e}")
+        except Exception as e:
+            logger.warning(f"DailyPnL finalize-on-stop skipped: {e}")
 
     def set_trading_mode(self, mode: str):
         self.trading_mode = mode

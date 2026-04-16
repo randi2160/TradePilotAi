@@ -16,7 +16,7 @@ from database.models import Base
 
 # CRITICAL: Import all models so SQLAlchemy registers them
 from database.models import (
-    User, Trade, EquityHistory, Watchlist, Alert, Signal,
+    User, Trade, EquityHistory, DailyPnL, Watchlist, Alert, Signal,
     TraderProfile, TradeBroadcast, Follow, BroadcastLike, BroadcastComment,
     SymbolChatMessage, Group, GroupMember, GroupPost, ModerationAction,
     CopyConfig, SocialNotification, AuditLog, ConsentRecord, LegalDocument,

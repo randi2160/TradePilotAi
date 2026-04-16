@@ -989,6 +989,119 @@ async def get_pdt(user: User = Depends(get_current_user)):
         acct = _broker.get_account()
         return {**acct, "error": str(e)}
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Dashboard — daily P&L snapshots, compound tracking, Alpaca account mirror
+# ══════════════════════════════════════════════════════════════════════════════
+
+from services import daily_pnl_service as _dpnl
+
+def _resolve_broker():
+    """Return a broker client if one is available — prefer the live bot loop's
+    broker so we pay the cost of one client, else fall back to a standalone."""
+    if bot_loop.broker:
+        return bot_loop.broker
+    try:
+        from broker.alpaca_client import AlpacaClient
+        return AlpacaClient(
+            paper      = getattr(config, 'ALPACA_MODE', 'paper') == 'paper',
+            api_key    = config.ALPACA_API_KEY,
+            api_secret = getattr(config, 'ALPACA_SECRET_KEY', ''),
+        )
+    except Exception as e:
+        logger.warning(f"dashboard: no broker available ({e})")
+        return None
+
+
+@app.get("/api/dashboard/today", tags=["Dashboard"])
+async def dashboard_today(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Today's P&L snapshot — realized, unrealized, combined — plus the running
+    compound total and %. Calling this refreshes the DailyPnL row from Alpaca."""
+    broker = _resolve_broker()
+    return _dpnl.get_today(db, user.id, broker=broker, refresh=True)
+
+
+@app.get("/api/dashboard/history", tags=["Dashboard"])
+async def dashboard_history(
+    days: int     = 30,
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Recent DailyPnL rows for the chart — oldest first."""
+    days = max(1, min(int(days), 365))
+    return _dpnl.get_history(db, user.id, days=days)
+
+
+@app.get("/api/dashboard/alpaca-snapshot", tags=["Dashboard"])
+async def dashboard_alpaca_snapshot(user: User = Depends(get_current_user)):
+    """Live Alpaca account mirror — cash, equity, buying power, today's gain."""
+    broker = _resolve_broker()
+    if not broker:
+        return {"connected": False, "error": "Connect your Alpaca account to see live balance."}
+    try:
+        acct = broker.get_account() or {}
+        if not acct:
+            return {"connected": False, "error": "Alpaca returned no data — check credentials."}
+        # Compute day gain: equity - (equity - pnl_today) = pnl_today, but we
+        # re-derive from portfolio_value vs. last_equity when available to match
+        # what Alpaca shows on its own dashboard.
+        return {
+            "connected":              True,
+            "equity":                 acct.get("equity", 0),
+            "cash":                   acct.get("cash", 0),
+            "portfolio_value":        acct.get("portfolio_value", 0),
+            "buying_power":           acct.get("buying_power", 0),
+            "non_marginable_bp":      acct.get("non_marginable_buying_power", 0),
+            "daytrading_bp":          acct.get("daytrading_buying_power", 0),
+            "pnl_today":              acct.get("pnl_today", 0),
+            "daytrade_count":         acct.get("daytrade_count", 0),
+            "day_trades_remaining":   acct.get("day_trades_remaining", 0),
+            "is_pdt_exempt":          acct.get("is_pdt_exempt", False),
+            "pattern_day_trader":     acct.get("pattern_day_trader", False),
+        }
+    except Exception as e:
+        logger.error(f"alpaca-snapshot error: {e}")
+        return {"connected": False, "error": str(e)}
+
+
+@app.post("/api/dashboard/snapshot", tags=["Dashboard"])
+async def dashboard_force_snapshot(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Force an immediate snapshot — useful for manual 'refresh' buttons."""
+    broker = _resolve_broker()
+    row = _dpnl.snapshot_today(db, user.id, broker=broker)
+    return _dpnl._row_to_dict(row)
+
+
+@app.post("/api/dashboard/finalize", tags=["Dashboard"])
+async def dashboard_finalize_day(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Finalize today's row. The scheduler calls this at end-of-session; exposed
+    here for manual triggering too."""
+    broker = _resolve_broker()
+    row = _dpnl.finalize_day(db, user.id, broker=broker)
+    return _dpnl._row_to_dict(row)
+
+
+@app.get("/api/dashboard/positions-detail", tags=["Dashboard"])
+async def dashboard_positions_detail(user: User = Depends(get_current_user)):
+    """Drill-down for the Open Positions tile — live positions with P&L."""
+    broker = _resolve_broker()
+    if not broker:
+        return {"positions": [], "error": "Connect broker to see positions."}
+    try:
+        return {"positions": broker.get_positions() or []}
+    except Exception as e:
+        return {"positions": [], "error": str(e)}
+
+
 @app.post("/api/analytics/backtest", tags=["Analytics"])
 async def run_backtest(
     symbol: str   = "SPY",

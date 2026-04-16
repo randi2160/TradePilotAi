@@ -42,6 +42,15 @@ class CapitalAllocator:
         Compute optimal capital split using weighted scoring.
         Returns allocation for both strategies.
         """
+        # FIX: Ensure total_capital and daily_goal are set before any calculations
+        if self.total_capital is None or self.total_capital == 0:
+            self.total_capital = 5000.0
+            logger.warning("total_capital was None in compute_split, using default $5000")
+        
+        if self.daily_goal is None or self.daily_goal == 0:
+            self.daily_goal = 150.0
+            logger.warning("daily_goal was None in compute_split, using default $150")
+        
         now  = datetime.now(ET)
         hour = now.hour + now.minute / 60
 
@@ -160,10 +169,14 @@ class CapitalAllocator:
         return result
 
     def _build_result(self, reasons, scalper_score, bounce_score) -> dict:
-        # FIX: Handle None total_capital (happens on first load)
+        # FIX: Handle None total_capital and daily_goal (happens on first load)
         if self.total_capital is None or self.total_capital == 0:
             self.total_capital = 5000.0
             logger.warning("total_capital was None, using default $5000")
+        
+        if self.daily_goal is None or self.daily_goal == 0:
+            self.daily_goal = 150.0
+            logger.warning("daily_goal was None, using default $150")
         
         scalper_cap = round(self.total_capital * self.scalper_pct, 2)
         bounce_cap  = round(self.total_capital * self.bounce_pct,  2)

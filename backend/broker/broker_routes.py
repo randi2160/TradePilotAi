@@ -55,6 +55,11 @@ def _load_creds(user: User) -> dict:
     return {}
 
 
+def _get_broker_creds(user: User) -> dict:
+    """Public wrapper for _load_creds - used by other modules."""
+    return _load_creds(user)
+
+
 def _resolve_broker_type(user: User) -> str:
     """Determine broker type safely — handles NULL from old DB rows."""
     # If user explicitly connected a broker, use that

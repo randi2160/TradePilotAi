@@ -131,6 +131,53 @@ class EquityHistory(Base):
     user = relationship("User", back_populates="equity_history")
 
 
+class DailyPnL(Base):
+    """
+    One row per (user_id, trade_date). Persists day-over-day performance so the
+    dashboard can show compound running totals and today's delta without having
+    to re-sum trades every page load.
+
+    Populated by services.daily_pnl_service:
+      - upserted live during the trading day (every ~30s or after each fill)
+      - finalized at end of session when the bot stops or at market close
+    """
+    __tablename__ = "daily_pnl"
+
+    id                 = Column(Integer, primary_key=True, index=True)
+    user_id            = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    trade_date         = Column(String(10), nullable=False, index=True)   # YYYY-MM-DD (local trading day)
+
+    # Equity snapshots — both DB-derived and Alpaca-derived, stored separately
+    starting_equity    = Column(Float,   default=0.0)   # Alpaca equity at first snapshot of the day
+    ending_equity      = Column(Float,   default=0.0)   # Alpaca equity at latest / end-of-day snapshot
+    alpaca_cash        = Column(Float,   default=0.0)   # Alpaca cash balance at snapshot time
+    alpaca_buying_power= Column(Float,   default=0.0)
+
+    # P&L breakdown
+    realized_pnl       = Column(Float,   default=0.0)   # sum(net_pnl) for trades closed today
+    unrealized_pnl     = Column(Float,   default=0.0)   # sum(unrealized_pl) across open positions at snapshot time
+    total_pnl          = Column(Float,   default=0.0)   # realized + unrealized (convenience)
+
+    # Compound tracking — running cumulative totals since day 1 of this user
+    compound_total     = Column(Float,   default=0.0)   # cumulative realized since account start
+    compound_pct       = Column(Float,   default=0.0)   # cumulative return % vs. starting capital
+
+    # Activity counters
+    trade_count        = Column(Integer, default=0)
+    win_count          = Column(Integer, default=0)
+    loss_count         = Column(Integer, default=0)
+
+    # State
+    is_finalized       = Column(Boolean, default=False) # True once the day is closed out
+    finalized_at       = Column(DateTime, nullable=True)
+    updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at         = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_daily_pnl_user_date", "user_id", "trade_date", unique=True),
+    )
+
+
 class Watchlist(Base):
     __tablename__ = "watchlists"
 

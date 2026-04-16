@@ -51,6 +51,13 @@ export const getTodayStats    = ()               => api.get('/analytics/today').
 export const getPDTStatus     = ()               => api.get('/analytics/pdt').then(r => r.data)
 export const runBacktest      = (sym, limit)     => api.post(`/analytics/backtest?symbol=${sym}&limit=${limit}`).then(r => r.data)
 
+// Dashboard — daily P&L + compound tracking + Alpaca snapshot
+export const getDashboardToday    = ()            => api.get('/dashboard/today').then(r => r.data)
+export const getDashboardHistory  = (days = 30)   => api.get(`/dashboard/history?days=${days}`).then(r => r.data)
+export const getAlpacaSnapshot    = ()            => api.get('/dashboard/alpaca-snapshot').then(r => r.data)
+export const forceDailySnapshot   = ()            => api.post('/dashboard/snapshot').then(r => r.data)
+export const getPositionsDetail   = ()            => api.get('/dashboard/positions-detail').then(r => r.data)
+
 // Settings
 export const getSettings      = ()               => api.get('/settings').then(r => r.data)
 export const updateCapital    = (capital)        => api.put('/settings/capital', { capital }).then(r => r.data)

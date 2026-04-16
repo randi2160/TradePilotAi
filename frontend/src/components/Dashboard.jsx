@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Target, Activity, DollarSign, BarChart2, Zap, Brain } from 'lucide-react'
+import { TrendingUp, TrendingDown, Target, Activity, DollarSign, BarChart2, Zap, Brain, ChevronRight } from 'lucide-react'
 import { api } from '../hooks/useAuth'
+import { getDashboardToday } from '../services/api'
 import LiveActivity from './LiveActivity'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -11,19 +12,41 @@ function pnlStr(val) {
 
 function cls(...args) { return args.filter(Boolean).join(' ') }
 
+// Navigate to a tab using the existing App.jsx custom-event pattern
+function goTo(tab) {
+  window.dispatchEvent(new CustomEvent('navigate', { detail: tab }))
+}
+
 // ── Stat Card ─────────────────────────────────────────────────────────────────
-function StatCard({ icon: Icon, label, value, sub, color, bg }) {
+// `tab` prop (optional) turns the card into a button that navigates to a tab.
+function StatCard({ icon: Icon, label, value, sub, color, bg, tab }) {
+  const clickable = Boolean(tab)
+  const Wrapper = clickable ? 'button' : 'div'
   return (
-    <div className={cls('bg-dark-800 border border-dark-600 rounded-xl p-4 flex gap-3 items-start', bg)}>
+    <Wrapper
+      {...(clickable ? {
+        onClick: () => goTo(tab),
+        type:   'button',
+        'aria-label': `Open ${label} details`,
+      } : {})}
+      className={cls(
+        'bg-dark-800 border border-dark-600 rounded-xl p-4 flex gap-3 items-start text-left w-full',
+        clickable && 'hover:border-brand-500/60 hover:bg-dark-700/50 transition-colors cursor-pointer group',
+        bg,
+      )}
+    >
       <div className="bg-dark-700 rounded-lg p-2 mt-0.5 flex-shrink-0">
         <Icon size={16} className="text-brand-500" />
       </div>
-      <div className="min-w-0">
-        <p className="text-xs text-gray-400 uppercase tracking-wide">{label}</p>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-gray-400 uppercase tracking-wide">{label}</p>
+          {clickable && <ChevronRight size={14} className="text-gray-600 group-hover:text-brand-500 transition-colors" />}
+        </div>
         <p className={cls('text-lg font-bold truncate', color || 'text-white')}>{value}</p>
-        {sub && <p className="text-xs text-gray-500 mt-0.5">{sub}</p>}
+        {sub && <p className="text-xs text-gray-500 mt-0.5 truncate">{sub}</p>}
       </div>
-    </div>
+    </Wrapper>
   )
 }
 
@@ -428,12 +451,14 @@ export default function Dashboard({ data }) {
   const [dualSummary,  setDualSummary]  = useState(null)
   const [todayStats,   setTodayStats]   = useState(null)
   const [engineStatus, setEngineStatus] = useState(null)
+  const [dayPnl,       setDayPnl]       = useState(null)   // from /api/dashboard/today
 
   useEffect(() => {
     const load = () => {
       api.get('/dual/summary').then(r => setDualSummary(r.data)).catch(() => {})
       api.get('/analytics/today').then(r => setTodayStats(r.data)).catch(() => {})
       api.get('/bot/engine-status').then(r => setEngineStatus(r.data)).catch(() => {})
+      getDashboardToday().then(setDayPnl).catch(() => {})
     }
     load()
     const iv = setInterval(load, 5000)
@@ -475,19 +500,75 @@ export default function Dashboard({ data }) {
 
       <CryptoLivePanel engineStatus={engineStatus} />
 
-      {/* Master P&L */}
+      {/* Master P&L — today big, compound small underneath */}
       <div className="bg-dark-800 border border-dark-600 rounded-xl p-5">
-        <div className="flex items-start justify-between mb-4">
-          <div>
+        <div className="flex items-start justify-between mb-4 gap-4 flex-wrap">
+          <div className="min-w-0">
             <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">
-              {dualOn ? 'Combined Strategy P&L' : "Today's P&L"}
+              {dualOn ? "Today's Combined P&L" : "Today's P&L"}
             </p>
-            <p className={cls('text-4xl font-black', combinedPnl >= 0 ? 'text-green-400' : 'text-red-400')}>
-              {pnlStr(combinedPnl)}
-            </p>
-            <p className="text-sm text-gray-400 mt-1">
-              Portfolio: <span className="text-white font-bold">{'$'}{equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
-            </p>
+            {/* Big today number — realized + unrealized when available */}
+            {(() => {
+              const todayTotal = dayPnl
+                ? (parseFloat(dayPnl.total_pnl) || 0)
+                : combinedPnl
+              const realizedToday   = dayPnl ? parseFloat(dayPnl.realized_pnl   || 0) : realized
+              const unrealizedToday = dayPnl ? parseFloat(dayPnl.unrealized_pnl || 0) : 0
+              const tradeCount      = dayPnl ? parseInt(dayPnl.trade_count || 0, 10) : trades
+              const openCount       = positions.length
+              // Winners in-trade: count open positions with positive unrealized
+              const openWinners     = positions.filter(p => (parseFloat(p.unrealized_pnl ?? p.unrealized_pl ?? 0) || 0) >= 0).length
+              const openLosers      = openCount - openWinners
+              const compound        = dayPnl ? parseFloat(dayPnl.compound_total || 0) : 0
+              const compoundPct     = dayPnl ? parseFloat(dayPnl.compound_pct   || 0) : 0
+              const up              = todayTotal >= 0
+              const cUp             = compound   >= 0
+              return (
+                <>
+                  <p className={cls('text-4xl font-black leading-tight', up ? 'text-green-400' : 'text-red-400')}>
+                    {pnlStr(todayTotal)}
+                  </p>
+                  {/* Color-coded breakdown: in-trade vs. settled */}
+                  <div className="flex gap-2 mt-2 flex-wrap text-xs">
+                    <span title="Closed trades booked today"
+                      className={cls('px-2 py-1 rounded-md border font-semibold flex items-center gap-1',
+                        realizedToday >= 0
+                          ? 'bg-green-900/20 border-green-800/40 text-green-400'
+                          : 'bg-red-900/20 border-red-800/40 text-red-400')}>
+                      <span className="opacity-60">Settled</span>
+                      <span>{pnlStr(realizedToday)}</span>
+                      <span className="opacity-60">({tradeCount})</span>
+                    </span>
+                    <span title="Open positions — floating P&L not yet booked"
+                      className={cls('px-2 py-1 rounded-md border font-semibold flex items-center gap-1',
+                        unrealizedToday >= 0
+                          ? 'bg-green-900/10 border-green-800/40 text-green-400'
+                          : 'bg-red-900/10 border-red-800/40 text-red-400')}>
+                      <span className="opacity-60">In trade</span>
+                      <span>{pnlStr(unrealizedToday)}</span>
+                      <span className="opacity-60">
+                        ({openCount}{openCount > 0 ? ` · ${openWinners}▲ ${openLosers}▼` : ''})
+                      </span>
+                    </span>
+                  </div>
+                  {/* Compound running total — subtle, always visible */}
+                  <div className="mt-2 pt-2 border-t border-dark-700 text-xs">
+                    <span className="text-gray-500">Since start: </span>
+                    <span className={cls('font-bold', cUp ? 'text-green-400' : 'text-red-400')}>
+                      {pnlStr(compound)}
+                    </span>
+                    <span className="text-gray-500"> · </span>
+                    <span className={cls('font-bold', cUp ? 'text-green-400' : 'text-red-400')}>
+                      {cUp ? '+' : ''}{compoundPct.toFixed(2)}%
+                    </span>
+                    <span className="text-gray-600 ml-2">vs. {'$'}{capital.toLocaleString()} starting capital</span>
+                  </div>
+                  <p className="text-sm text-gray-400 mt-2">
+                    Portfolio: <span className="text-white font-bold">{'$'}{equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  </p>
+                </>
+              )
+            })()}
           </div>
           <div className="text-right">
             <p className="text-xs text-gray-400">Daily Target</p>
@@ -561,23 +642,27 @@ export default function Dashboard({ data }) {
         </div>
       )}
 
-      {/* Stat cards */}
+      {/* Stat cards — clickable, each opens a dedicated page */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard icon={DollarSign} label="Portfolio Value"
           value={'$' + equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}
           sub={totalReturn + '% total return'}
-          color={equity >= capital ? 'text-green-400' : 'text-red-400'} />
+          color={equity >= capital ? 'text-green-400' : 'text-red-400'}
+          tab="portfolio" />
         <StatCard icon={Activity} label="Win Rate Today"
           value={winRate + '%'}
           sub={trades + ' trade' + (trades !== 1 ? 's' : '') + ' today'}
-          color={winRate >= 50 ? 'text-green-400' : 'text-red-400'} />
+          color={winRate >= 50 ? 'text-green-400' : 'text-red-400'}
+          tab="performance" />
         <StatCard icon={TrendingUp} label="Active Signals"
           value={activeSignals.length}
-          sub={activeSignals.slice(0, 2).map(s => s.symbol + ' ' + s.signal).join(' · ')}
-          color={activeSignals.length > 0 ? 'text-brand-500' : 'text-gray-400'} />
+          sub={activeSignals.slice(0, 2).map(s => s.symbol + ' ' + s.signal).join(' · ') || 'No active signals'}
+          color={activeSignals.length > 0 ? 'text-brand-500' : 'text-gray-400'}
+          tab="signals" />
         <StatCard icon={BarChart2} label="Open Positions"
           value={positions.length}
-          sub={positions.slice(0, 2).map(p => p.symbol).join(', ') || 'None'} />
+          sub={positions.slice(0, 2).map(p => p.symbol).join(', ') || 'None'}
+          tab="trades" />
       </div>
 
       {/* Active signals */}
