@@ -36,7 +36,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy.orm import Session
 
-from auth.auth       import get_current_user
+from auth.auth       import get_current_user, decode_token
 from auth.routes     import router as auth_router
 from strategy.bounce_routes import router as bounce_router
 from strategy.dual_routes   import router as dual_router
@@ -401,6 +401,35 @@ if _has_daily and daily_router:
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
+    # SECURITY (2026-04-16 incident): previously this endpoint accepted any
+    # connection and blasted bot_loop.get_live_summary() — which includes
+    # bot_loop.broker.get_account() / get_positions() — to every client.
+    # That was leaking the admin's Alpaca state to every logged-in user's
+    # dashboard in real time.
+    #
+    # Now: require a valid JWT, resolve the caller's OWN per-user broker,
+    # and overwrite the summary's account/positions with that user's data.
+    # If the user has no saved broker creds, send empty account/positions.
+    if not token:
+        await ws.close(code=4401)
+        return
+    try:
+        payload = decode_token(token)
+        email   = payload.get("sub")
+        if not email:
+            await ws.close(code=4401)
+            return
+    except Exception:
+        await ws.close(code=4401)
+        return
+
+    from database.database import SessionLocal as _SL
+    with _SL() as _db:
+        user = _db.query(User).filter(User.email == email, User.is_active == True).first()
+    if not user:
+        await ws.close(code=4401)
+        return
+
     await ws.accept()
     ws_clients.append(ws)
     try:
@@ -408,6 +437,27 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
             try:
                 summary = bot_loop.get_live_summary()
                 summary["settings"] = settings.all()
+
+                # ── SECURITY: overwrite admin-scoped account/positions ──────
+                # bot_loop.get_live_summary() fills `account` and `positions`
+                # from bot_loop.broker (the admin's .env-backed client). For
+                # each connected user we replace those two fields with data
+                # from their OWN saved Alpaca credentials.
+                try:
+                    user_broker = _resolve_broker(user)
+                except Exception:
+                    user_broker = None
+
+                if user_broker is not None:
+                    try:
+                        summary["account"]   = user_broker.get_account()   or {}
+                        summary["positions"] = user_broker.get_positions() or []
+                    except Exception:
+                        summary["account"]   = {}
+                        summary["positions"] = []
+                else:
+                    summary["account"]   = {}
+                    summary["positions"] = []
 
                 # Merge crypto engine P&L into the top-level summary
                 global _hybrid_engine, _crypto_running
