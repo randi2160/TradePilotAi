@@ -1,10 +1,22 @@
 """
 Peak Bounce API routes — all endpoints for the bounce strategy.
 Prefix: /api/bounce
+
+Per-user isolation
+------------------
+Each user gets their OWN PeakBounceEngine keyed by user_id. Previously a
+single singleton was reset whenever a caller's capital differed from the
+cached engine — two users with the same capital accidentally shared one
+engine (with all of its symbol/pattern/ladder state). Now `_engines` is a
+registry and callers only touch their own engine.
+
+The old `getattr(app_module, "bot_loop", None)` singleton lookup has been
+replaced with `get_user_bot_if_exists(user.id)` so analyze/scan only use
+THIS user's bot/broker.
 """
 import asyncio
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -18,17 +30,33 @@ from strategy.peak_bounce import PeakBounceEngine, WINDOWS, DEFAULT_WINDOW
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/bounce", tags=["Peak Bounce Strategy"])
 
-# ── Singleton engine (shared, reset daily) ────────────────────────────────────
-_engine: Optional[PeakBounceEngine] = None
+# ── Per-user engine registry ──────────────────────────────────────────────────
+_engines: Dict[int, PeakBounceEngine] = {}
 
 def get_engine(user: User) -> PeakBounceEngine:
-    global _engine
-    if _engine is None or _engine.capital != user.capital:
-        _engine = PeakBounceEngine(
+    """Fetch-or-create THIS user's bounce engine, rebuilt if capital changes."""
+    eng = _engines.get(user.id)
+    if eng is None or eng.capital != user.capital:
+        eng = PeakBounceEngine(
             capital    = user.capital,
             daily_goal = user.daily_target_max,
         )
-    return _engine
+        _engines[user.id] = eng
+    return eng
+
+def _user_bot(user_id: int):
+    """Return THIS user's BotLoop (if any). Uses main.py's per-user registry.
+
+    Returns None if main.py isn't importable or the user has never started
+    their bot — callers MUST handle that case (no admin-fallback).
+    """
+    try:
+        import main as _app_module
+        fn = getattr(_app_module, "get_user_bot_if_exists", None)
+        return fn(user_id) if fn else None
+    except Exception as e:
+        logger.warning(f"bounce: _user_bot lookup failed: {e}")
+        return None
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -67,9 +95,9 @@ async def analyze(
     user: User    = Depends(get_current_user),
     db:   Session = Depends(get_db),
 ):
-    import main as _app_module
-    bot_loop = getattr(_app_module, "bot_loop", None)
-    if not bot_loop.broker:
+    # Use THIS user's bot/broker — never fall back to the old singleton.
+    user_bot = _user_bot(user.id)
+    if not user_bot or not user_bot.broker:
         raise HTTPException(400, "Start the bot first to load market data")
 
     engine = get_engine(user)
@@ -78,7 +106,7 @@ async def analyze(
 
     # Get bar data
     bars_needed = WINDOWS[window]["bars"] + 20
-    df = bot_loop.broker.get_bars(symbol, timeframe="5Min", limit=bars_needed)
+    df = user_bot.broker.get_bars(symbol, timeframe="5Min", limit=bars_needed)
     if df.empty:
         raise HTTPException(400, f"No market data for {symbol}")
 
@@ -191,7 +219,7 @@ async def scan_bounce_candidates(
     window: str = DEFAULT_WINDOW,
     user:   User = Depends(get_current_user),
 ):
-    import main as _m; bot_loop = getattr(_m, "bot_loop", None)
+    user_bot = _user_bot(user.id)
     from data.market_scanner import MarketScanner
     from data.news_scanner   import NewsScanner
     import config
@@ -208,9 +236,10 @@ async def scan_bounce_candidates(
         gainers     = []
         scan_result = {}
 
-    # Build symbol list — use watchlist if bot running, else defaults
+    # Build symbol list — use THIS user's watchlist if their bot is running,
+    # else defaults. Never pull from another user's bot.
     try:
-        watchlist = bot_loop.watchlist if bot_loop else list(config.DEFAULT_WATCHLIST)
+        watchlist = user_bot.watchlist if user_bot else list(config.DEFAULT_WATCHLIST)
     except Exception:
         watchlist = list(config.DEFAULT_WATCHLIST)
 
@@ -223,13 +252,13 @@ async def scan_bounce_candidates(
     except Exception:
         sentiments = {}
 
-    # Analyze patterns — only if bot/broker available
+    # Analyze patterns — only if THIS user's bot/broker is available.
     results = []
-    if bot_loop and bot_loop.broker:
+    if user_bot and user_bot.broker:
         for symbol in all_syms:
             try:
                 bars = WINDOWS.get(window, WINDOWS[DEFAULT_WINDOW])["bars"] + 20
-                df   = bot_loop.broker.get_bars(symbol, "5Min", limit=bars)
+                df   = user_bot.broker.get_bars(symbol, "5Min", limit=bars)
                 if df.empty:
                     continue
                 from data.indicators import add_all_indicators
