@@ -1388,8 +1388,8 @@ async def protection_get_settings(
         # Ladder (per-position trail + scale-out)
         "ladder_enabled":        bool(getattr(row, "ladder_enabled", True)),
         "scaleout_enabled":      bool(getattr(row, "scaleout_enabled", True)),
-        "scaleout_milestones":   list(getattr(row, "scaleout_milestones", None) or [0.05, 0.10, 0.15]),
-        "scaleout_fraction":     float(getattr(row, "scaleout_fraction", 0.25) or 0.25),
+        "scaleout_milestones":   list(getattr(row, "scaleout_milestones", None) or [0.03, 0.06, 0.10, 0.15]),
+        "scaleout_fraction":     float(getattr(row, "scaleout_fraction", 0.20) or 0.20),
         "concentration_pct":     float(getattr(row, "concentration_pct", 0.30) or 0.30),
         "time_decay_hours":      float(getattr(row, "time_decay_hours",  4.0)  or 4.0),
     }

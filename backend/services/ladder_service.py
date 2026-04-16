@@ -48,18 +48,36 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Interpretation: if peak gain has reached the first column, trail stop sits
 # at (peak_gain × second_column). Evaluated top-down; first match wins.
-# Example: peak +11.23% → matches row (0.10, 0.75) → trail at 11.23 × 0.75 = +8.42%
+# Example: peak +11.23% → matches row (0.10, 0.88) → trail at 11.23 × 0.88 = +9.88%
 #
 # Breakeven rows use 0.0 to mean "trail at entry price" (lock no loss).
 # Rows with trail_frac = None mean "no trail yet — use initial stop_loss only".
+#
+# Design principle (2026-04-16 rewrite):
+# ─────────────────────────────────────
+# Max give-back between peak and trail should never exceed ~1.5% of entry
+# (roughly 1 standard deviation of intraday movement for most stocks).
+# This means at higher gains we must lock a HIGHER fraction. Previous tiers
+# (85% max) left too much on the table — e.g. peak +34% only locked +28.9%,
+# giving back 5.1% ($255 on $5K). The new tiers cap give-back at ~1.5%
+# even for large runners.
+#
+# Example: $5000 position, $1700 unrealized (+34% peak).
+#   Old: tier5 (0.85) → trail at +28.9% → fires at ~$1,445 → give-back $255
+#   New: tier8 (0.955) → trail at +32.5% → fires at ~$1,625 → give-back $75
+#
 LADDER_TIERS = [
     # (peak_gain_floor, trail_fraction_of_peak, label)
-    (0.15, 0.85, "tier5_runner"),       # peak >=15% → lock 85%
-    (0.10, 0.75, "tier4_breakout"),     # peak >=10% → lock 75%
-    (0.07, 0.65, "tier3_strong"),       # peak  >=7% → lock 65%
-    (0.04, 0.50, "tier2_building"),     # peak  >=4% → lock 50%
-    (0.02, 0.00, "tier1_breakeven"),    # peak  >=2% → trail at entry
-    (0.00, None, "tier0_inactive"),     # peak   <2% → no trail, initial stop rules
+    (0.25, 0.955, "tier8_moon"),        # peak >=25%  → lock 95.5% (max give-back ~1.1%)
+    (0.20, 0.945, "tier7_rocket"),      # peak >=20%  → lock 94.5% (max give-back ~1.1%)
+    (0.15, 0.93,  "tier6_runner"),      # peak >=15%  → lock 93%   (max give-back ~1.1%)
+    (0.10, 0.88,  "tier5_breakout"),    # peak >=10%  → lock 88%   (max give-back ~1.2%)
+    (0.07, 0.82,  "tier4_strong"),      # peak  >=7%  → lock 82%   (max give-back ~1.3%)
+    (0.05, 0.75,  "tier3_building"),    # peak  >=5%  → lock 75%   (max give-back ~1.3%)
+    (0.03, 0.60,  "tier2_early"),       # peak  >=3%  → lock 60%   (max give-back ~1.2%)
+    (0.015, 0.35, "tier1_starter"),     # peak >=1.5% → lock 35%   (~+0.5% protected)
+    (0.008, 0.00, "tier0_breakeven"),   # peak >=0.8% → trail at entry (breakeven)
+    (0.00, None,  "tier_inactive"),     # peak  <0.8% → no trail, initial stop only
 ]
 
 
@@ -252,7 +270,7 @@ def decide_action(
         protected = peak_pct - (peak_pct - trail_pct)  # = trail_pct
         # Only fire if we actually have a meaningful trail (prevents noise
         # at +0.01% peaks where trail is ~0 and just oscillates)
-        if peak_pct >= LADDER_TIERS[-2][0]:   # peak >= 2% (tier1 floor)
+        if peak_pct >= 0.008:   # peak >= 0.8% (breakeven tier floor)
             return {
                 "action":       "trail_exit",
                 "symbol":       trade.symbol,
