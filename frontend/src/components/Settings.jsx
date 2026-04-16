@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { getSettings, updateCapital, updateTargets, addSymbol, removeSymbol, setWatchlist } from '../services/api'
 import MilestoneSettings from './MilestoneSettings'
+import ProtectionSettings from './ProtectionSettings'
 import { Plus, X, Save, DollarSign, Target, List } from 'lucide-react'
 
 function InputField({ label, value, onChange, prefix='$', min, max, step=1, help }) {
@@ -421,6 +422,9 @@ export default function Settings() {
           The bot scans all symbols above every 30 seconds. More symbols = more opportunities but slower scan.
         </p>
       </div>
+
+      {/* ── Profit Protection — account-level floor, harvest, breach ─────── */}
+      <ProtectionSettings />
     </div>
   )
 }

@@ -3,7 +3,8 @@ import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ReferenceLine, ResponsiveContainer, Cell, Legend,
 } from 'recharts'
-import { getDashboardHistory, getDashboardToday } from '../services/api'
+import { Lock, AlertTriangle } from 'lucide-react'
+import { getDashboardHistory, getDashboardToday, getProtectionStatus } from '../services/api'
 
 // Ranges kept as user requested. 1H/4H/1D collapse to "today"; 7D shows last 7 sessions.
 const RANGES = [
@@ -57,10 +58,11 @@ function CustomTooltip({ active, payload }) {
 }
 
 export default function PortfolioChart({ capital = 5000 }) {
-  const [history, setHistory] = useState([])
-  const [today,   setToday]   = useState(null)
-  const [range,   setRange]   = useState(RANGES[3])   // default 7D
-  const [loading, setLoading] = useState(false)
+  const [history,    setHistory]    = useState([])
+  const [today,      setToday]      = useState(null)
+  const [protection, setProtection] = useState(null)
+  const [range,      setRange]      = useState(RANGES[3])   // default 7D
+  const [loading,    setLoading]    = useState(false)
 
   useEffect(() => { load() /* eslint-disable-next-line */ }, [range])
   useEffect(() => {
@@ -72,12 +74,14 @@ export default function PortfolioChart({ capital = 5000 }) {
   async function load() {
     setLoading(true)
     try {
-      const [hist, tod] = await Promise.all([
+      const [hist, tod, prot] = await Promise.all([
         getDashboardHistory(range.days).catch(() => []),
         getDashboardToday().catch(() => null),
+        getProtectionStatus().catch(() => null),
       ])
       setHistory(Array.isArray(hist) ? hist : [])
       setToday(tod)
+      setProtection(prot)
     } finally {
       setLoading(false)
     }
@@ -101,23 +105,59 @@ export default function PortfolioChart({ capital = 5000 }) {
     losses:     parseInt(r.loss_count  || 0, 10),
   }))
 
-  // Header numbers come from today's row (the latest truth)
-  const ending   = parseFloat(today?.ending_equity  || 0) || capital
-  const compound = parseFloat(today?.compound_total || 0)
-  const compPct  = parseFloat(today?.compound_pct   || 0)
-  const todayTotal = parseFloat(today?.total_pnl    || 0)
-  const up         = todayTotal >= 0
-  const cUp        = compound   >= 0
+  // Portfolio value = starting capital + all-time realized (compound) + today's
+  // unrealized. We deliberately DO NOT use raw Alpaca equity here — that mixes
+  // the uninvested Alpaca balance with what the bot has actually earned on
+  // your $5k trading base.
+  const compound    = parseFloat(today?.compound_total || 0)
+  const unrealToday = parseFloat(today?.unrealized_pnl || 0)
+  const lockedValue = capital + compound                     // truly banked
+  const ending      = lockedValue + unrealToday              // live effective equity
+  const compPct     = capital > 0
+    ? (compound / capital) * 100
+    : parseFloat(today?.compound_pct || 0)
+  const todayTotal  = parseFloat(today?.total_pnl    || 0)
+  const up          = todayTotal >= 0
+  const cUp         = compound   >= 0
 
   // Nothing to chart yet
   const empty = chartData.length === 0 || chartData.every(d => !d.realized && !d.unrealized && !d.compound)
 
+  // Protection fields (null-safe)
+  const floorValue   = parseFloat(protection?.floor_value || 0)
+  const baseCapital  = parseFloat(protection?.initial_capital || capital || 0)
+  const lockedGains  = Math.max(0, floorValue - baseCapital)
+  const showFloor    = protection?.enabled && floorValue > 0
+  const breached     = protection?.breached
+  const gainToNext   = parseFloat(protection?.gain_to_next_milestone || 0)
+
   return (
     <div className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">
+      {/* Breach banner — only when equity has fallen below the locked floor */}
+      {breached && (
+        <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-3 flex items-center gap-2">
+          <AlertTriangle size={18} className="text-red-400 shrink-0"/>
+          <div className="flex-1">
+            <p className="text-sm font-bold text-red-300">
+              Floor breached — live equity below ${money(floorValue)}
+            </p>
+            <p className="text-xs text-red-400/80">
+              Protection triggered ({protection?.breach_action || 'halt_close'}).
+              Review open positions before resuming.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex justify-between items-start flex-wrap gap-3">
         <div>
-          <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Portfolio Equity</p>
+          <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">
+            Portfolio Equity
+            <span className="ml-2 text-gray-600 normal-case tracking-normal">
+              = ${money(capital, 0)} base + gains
+            </span>
+          </p>
           <p className="text-3xl font-black text-white">${money(ending)}</p>
           <div className="flex gap-3 mt-1 flex-wrap text-sm">
             <span className={up ? 'text-green-400' : 'text-red-400'}>
@@ -128,6 +168,28 @@ export default function PortfolioChart({ capital = 5000 }) {
               Since start: {cUp ? '+' : ''}${money(compound)} ({cUp ? '+' : ''}{compPct.toFixed(2)}%)
             </span>
           </div>
+
+          {/* Locked-floor badge */}
+          {showFloor && (
+            <div className="flex items-center gap-2 mt-2">
+              <div className="inline-flex items-center gap-1.5 bg-brand-500/10 border border-brand-500/40 rounded-lg px-2.5 py-1">
+                <Lock size={12} className="text-brand-400" />
+                <span className="text-xs font-semibold text-brand-300">
+                  Floor locked at ${money(floorValue, 0)}
+                </span>
+                {lockedGains > 0 && (
+                  <span className="text-xs text-brand-400/70">
+                    (+${money(lockedGains, 0)} permanent)
+                  </span>
+                )}
+              </div>
+              {gainToNext > 0 && (
+                <span className="text-xs text-gray-500">
+                  next step: +${money(gainToNext, 0)} realized
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex gap-1">
@@ -218,16 +280,27 @@ export default function PortfolioChart({ capital = 5000 }) {
         )}
       </div>
 
-      {/* Stats row — now sourced from persisted DailyPnL so Current Value and
-          Total Return reflect reality even before the chart has history. */}
-      <div className="grid grid-cols-3 gap-3 pt-2 border-t border-dark-600">
+      {/* Stats row — sourced from persisted DailyPnL. Four columns now so the
+          user can see what's BANKED vs. what's still floating in open trades. */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2 border-t border-dark-600">
         <div className="text-center">
           <p className="text-xs text-gray-500">Starting Capital</p>
           <p className="text-sm font-bold text-white">${money(capital, 0)}</p>
         </div>
         <div className="text-center">
-          <p className="text-xs text-gray-500">Current Value</p>
+          <p className="text-xs text-gray-500">Banked (realized)</p>
+          <p className={cls('text-sm font-bold', cUp ? 'text-green-400' : 'text-red-400')}>
+            ${money(lockedValue)}
+          </p>
+        </div>
+        <div className="text-center">
+          <p className="text-xs text-gray-500">Portfolio Value</p>
           <p className="text-sm font-bold text-white">${money(ending)}</p>
+          {unrealToday !== 0 && (
+            <p className={cls('text-xs', unrealToday >= 0 ? 'text-green-500' : 'text-red-500')}>
+              {unrealToday >= 0 ? '+' : ''}${money(unrealToday)} floating
+            </p>
+          )}
         </div>
         <div className="text-center">
           <p className="text-xs text-gray-500">Total Return</p>

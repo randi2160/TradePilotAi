@@ -135,6 +135,7 @@ class BotLoop:
         await self._train_models()
         last_train_day = datetime.now(ET).date()
         last_wl_day    = None
+        last_harvest_ts = 0.0   # unix timestamp of last harvest tick
 
         while self.status == "running":
             try:
@@ -168,6 +169,19 @@ class BotLoop:
                 positions  = self.broker.get_positions()
                 unrealized = sum(p.get("unrealized_pnl", 0) for p in positions)
                 self.tracker.update_unrealized(unrealized)
+
+                # ── Profit protection (account-level floor + harvest + breach) ──
+                # The snapshot ratchets the floor automatically; here we watch
+                # live equity for breaches and periodically harvest oversized
+                # unrealized winners into realized so they're permanently banked.
+                try:
+                    import time as _t
+                    now_ts = _t.time()
+                    if now_ts - last_harvest_ts > 60:   # at most once/minute
+                        last_harvest_ts = now_ts
+                        await self._run_protection_tick(positions)
+                except Exception as e:
+                    logger.warning(f"protection tick failed: {e}")
 
                 should_stop, reason = self.tracker.should_stop()
                 if should_stop:
@@ -268,6 +282,82 @@ class BotLoop:
                 "timestamp":    datetime.now(ET).isoformat(),
             })
             self._unusual_volume = self._unusual_volume[-20:]
+
+    async def _run_protection_tick(self, positions: list):
+        """Run one protection cycle: harvest big winners + check floor breach.
+
+        Runs at most once/minute (rate-limited by the caller). Safe against
+        transient errors — never takes down the scan loop.
+        """
+        from database.database  import SessionLocal
+        from services           import protection_service, ladder_service
+
+        user_id = 1  # single-user default, matches strategy/engine.py
+        try:
+            with SessionLocal() as db:
+                # 1a) Ladder tick — per-position peak tracking, trail exits,
+                #     partial scale-outs. Runs FIRST because it's more
+                #     granular than harvest (trails fire before +8% threshold
+                #     most of the time, and scale-outs preserve runners).
+                try:
+                    ladder_result = ladder_service.run_ladder_tick(db, user_id, self.broker)
+                    for act in ladder_result.get("actions", []):
+                        logger.info(
+                            f"🪜 Ladder {act['action']}: {act['symbol']} — {act['reason']}"
+                        )
+                except Exception as e:
+                    logger.warning(f"ladder_service.run_ladder_tick: {e}")
+
+                # 1b) Harvest — coarse safety net for anything the ladder
+                #     didn't catch (untracked manual positions, runaway winners
+                #     above harvest_portfolio_cap, etc.)
+                try:
+                    result = protection_service.harvest_positions(db, user_id, self.broker)
+                    harvested = result.get("harvested", [])
+                    if harvested:
+                        for h in harvested:
+                            logger.info(f"🌾 Harvested {h['symbol']}: {h['reason']}")
+                except Exception as e:
+                    logger.warning(f"harvest_positions: {e}")
+
+                # 2) Snapshot + ratchet runs on the daily_pnl_service flow
+                #    (called from main.py snapshot endpoints and finalize_day).
+                #    Here we just read the current floor + live equity and see
+                #    if we've breached.
+                live_equity = 0.0
+                try:
+                    acct = self.broker.get_account() or {}
+                    live_equity = float(acct.get("equity", 0) or 0)
+                except Exception:
+                    live_equity = 0.0
+
+                if live_equity > 0:
+                    breach = protection_service.check_breach(db, user_id, live_equity)
+                    if breach.get("breached"):
+                        logger.warning(
+                            f"⚠️ Floor breach: equity ${live_equity:.2f} < "
+                            f"floor ${breach.get('floor_value', 0):.2f} "
+                            f"(shortfall ${breach.get('shortfall', 0):.2f}) — "
+                            f"action={breach.get('action')}"
+                        )
+                        protection_service.execute_breach_response(
+                            db, user_id, self.broker, bot_loop=self._stop_shim()
+                        )
+        except Exception as e:
+            logger.warning(f"_run_protection_tick outer: {e}")
+
+    def _stop_shim(self):
+        """Returns an object with a synchronous `stop()` method that schedules
+        our async stop() on the running event loop. Needed because the
+        protection service calls bot_loop.stop() synchronously."""
+        loop_self = self
+        class _Shim:
+            def stop(self_inner):
+                try:
+                    asyncio.create_task(loop_self.stop())
+                except Exception:
+                    loop_self.status = "stopped"
+        return _Shim()
 
     async def _train_models(self):
         try:

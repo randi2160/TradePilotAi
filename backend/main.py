@@ -1102,6 +1102,123 @@ async def dashboard_positions_detail(user: User = Depends(get_current_user)):
         return {"positions": [], "error": str(e)}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Profit Protection — account-level floor, ratchet, harvest
+# ══════════════════════════════════════════════════════════════════════════════
+
+from services import protection_service as _prot
+from services import ladder_service     as _ladder
+
+
+@app.get("/api/protection/settings", tags=["Protection"])
+async def protection_get_settings(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Return the user's protection settings row (auto-created on first call)."""
+    row = _prot.get_or_create(db, user.id)
+    return {
+        "enabled":               bool(row.enabled),
+        "floor_value":           float(row.floor_value or 0.0),
+        "initial_capital":       float(row.initial_capital or 0.0),
+        "milestone_size":        float(row.milestone_size or 100.0),
+        "lock_pct":              float(row.lock_pct or 0.0),
+        "harvest_position_pct":  float(row.harvest_position_pct or 0.0),
+        "harvest_portfolio_cap": float(row.harvest_portfolio_cap or 0.0),
+        "breach_action":         row.breach_action,
+        "peak_compound":         float(row.peak_compound or 0.0),
+        "last_ratchet_at":       row.last_ratchet_at.isoformat() if row.last_ratchet_at else None,
+        "last_breach_at":        row.last_breach_at.isoformat()  if row.last_breach_at  else None,
+        "last_harvest_at":       row.last_harvest_at.isoformat() if row.last_harvest_at else None,
+        # Ladder (per-position trail + scale-out)
+        "ladder_enabled":        bool(getattr(row, "ladder_enabled", True)),
+        "scaleout_enabled":      bool(getattr(row, "scaleout_enabled", True)),
+        "scaleout_milestones":   list(getattr(row, "scaleout_milestones", None) or [0.05, 0.10, 0.15]),
+        "scaleout_fraction":     float(getattr(row, "scaleout_fraction", 0.25) or 0.25),
+        "concentration_pct":     float(getattr(row, "concentration_pct", 0.30) or 0.30),
+        "time_decay_hours":      float(getattr(row, "time_decay_hours",  4.0)  or 4.0),
+    }
+
+
+@app.put("/api/protection/settings", tags=["Protection"])
+async def protection_update_settings(
+    updates: dict,
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Update editable protection fields (enabled, milestone_size, lock_pct,
+    harvest_position_pct, harvest_portfolio_cap, breach_action).
+    Immutable fields (floor_value, initial_capital, peak_compound, last_*_at)
+    are rejected server-side."""
+    row = _prot.update_settings(db, user.id, updates or {})
+    logger.info(f"Protection settings updated for user {user.id}: {list((updates or {}).keys())}")
+    return await protection_get_settings(user=user, db=db)
+
+
+@app.get("/api/protection/status", tags=["Protection"])
+async def protection_get_status(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """One-shot status packet for the dashboard badge/banner. Includes live
+    equity (from Alpaca, when available) and breach state."""
+    live_equity = None
+    broker = _resolve_broker()
+    if broker is not None:
+        try:
+            acct = broker.get_account() or {}
+            live_equity = float(acct.get("equity", 0) or 0) or None
+        except Exception:
+            live_equity = None
+    return _prot.get_status(db, user.id, live_equity=live_equity)
+
+
+@app.post("/api/protection/harvest", tags=["Protection"])
+async def protection_force_harvest(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Manual trigger — run the harvest scan now (e.g. from a UI button)."""
+    broker = _resolve_broker()
+    if broker is None:
+        raise HTTPException(400, "Broker not connected — start bot or attach broker first.")
+    return _prot.harvest_positions(db, user.id, broker)
+
+
+# ── Ladder (per-position trail + partial scale-out) ──────────────────────────
+
+@app.get("/api/protection/ladder/status", tags=["Protection"])
+async def protection_ladder_status(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Read-only snapshot of per-position ladder state: peak gain %, active
+    trail %, tier label, scale-out levels hit, and protected $ for each open
+    position. Used by the dashboard to show how much of the unrealized gain is
+    locked in by trails."""
+    broker = _resolve_broker()
+    if broker is None:
+        return {
+            "enabled":   False,
+            "positions": [],
+            "error":     "Broker not connected — start bot or attach broker first.",
+        }
+    return _ladder.get_ladder_status(db, user.id, broker)
+
+
+@app.post("/api/protection/ladder/tick", tags=["Protection"])
+async def protection_ladder_tick(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """Manual trigger — run one ladder tick now (peak update + trail exits +
+    scale-outs). Normally called automatically every ~60s from the bot loop."""
+    broker = _resolve_broker()
+    if broker is None:
+        raise HTTPException(400, "Broker not connected — start bot or attach broker first.")
+    return _ladder.run_ladder_tick(db, user.id, broker)
+
+
 @app.post("/api/analytics/backtest", tags=["Analytics"])
 async def run_backtest(
     symbol: str   = "SPY",

@@ -58,6 +58,16 @@ export const getAlpacaSnapshot    = ()            => api.get('/dashboard/alpaca-
 export const forceDailySnapshot   = ()            => api.post('/dashboard/snapshot').then(r => r.data)
 export const getPositionsDetail   = ()            => api.get('/dashboard/positions-detail').then(r => r.data)
 
+// Profit Protection — account-level floor, ratchet, harvest
+export const getProtectionSettings    = ()        => api.get('/protection/settings').then(r => r.data)
+export const updateProtectionSettings = (body)    => api.put('/protection/settings', body).then(r => r.data)
+export const getProtectionStatus      = ()        => api.get('/protection/status').then(r => r.data)
+export const forceHarvest             = ()        => api.post('/protection/harvest').then(r => r.data)
+
+// Ladder — per-position trailing stops + partial scale-out
+export const getLadderStatus          = ()        => api.get('/protection/ladder/status').then(r => r.data)
+export const forceLadderTick          = ()        => api.post('/protection/ladder/tick').then(r => r.data)
+
 // Settings
 export const getSettings      = ()               => api.get('/settings').then(r => r.data)
 export const updateCapital    = (capital)        => api.put('/settings/capital', { capital }).then(r => r.data)

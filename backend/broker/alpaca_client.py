@@ -144,18 +144,65 @@ class AlpacaClient:
             return pd.DataFrame()
 
     def get_crypto_bars(self, symbol: str, timeframe: str = "1Min", limit: int = 300) -> pd.DataFrame:
-        """Get OHLCV bars for crypto — yfinance primary (free), Alpaca secondary (paid plan)."""
+        """
+        Get OHLCV bars for crypto.
+
+        Primary: Alpaca v1beta3 /crypto/us/bars — FREE on Basic tier, real-time,
+        same feed the executor uses (eliminates scan-vs-fill price drift).
+        Fallback: yfinance — 15-min delayed but covers edge cases when Alpaca
+        returns empty (new listings, temporary outages).
+
+        Binance has been removed entirely: AWS US IPs get HTTP 451 geo-blocked.
+        """
         pair = symbol.upper()
         if "/" not in pair:
             pair = f"{pair}/USD"
 
-        # Method 1: yfinance (free, works with basic Alpaca plan)
+        # ── Method 1: Alpaca v1beta3 (FREE, real-time, matches execution feed) ──
+        import requests as _req
+        try:
+            api_key    = getattr(self, "api_key", None) or getattr(self, "key", "")
+            secret_key = getattr(self, "secret_key", None) or getattr(self, "secret", "")
+            if not api_key:
+                import config as _cfg
+                api_key, secret_key = _cfg.ALPACA_API_KEY, _cfg.ALPACA_SECRET_KEY
+            tf_map = {"1Min": "1Min", "5Min": "5Min", "15Min": "15Min", "1Hour": "1Hour", "1Day": "1Day"}
+            headers = {}
+            if api_key and secret_key:
+                headers = {"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret_key}
+            resp = _req.get(
+                "https://data.alpaca.markets/v1beta3/crypto/us/bars",
+                params={"symbols": pair, "timeframe": tf_map.get(timeframe,"1Min"), "limit": limit, "sort": "asc"},
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                bars_data = resp.json().get("bars", {}).get(pair, [])
+                if bars_data and len(bars_data) >= 3:
+                    df = pd.DataFrame(bars_data).rename(
+                        columns={"t":"timestamp","o":"open","h":"high","l":"low","c":"close","v":"volume"})
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    df = df.set_index("timestamp")
+                    available = [c for c in ["open","high","low","close","volume"] if c in df.columns]
+                    if "close" in available and len(df) >= 3:
+                        last_close = float(df["close"].iloc[-1])
+                        logger.debug(f"Crypto bars {pair} via Alpaca: {len(df)} rows, last=${last_close:.4f}")
+                        return df[available].copy()
+            elif resp.status_code == 429:
+                logger.warning(f"Alpaca crypto bars rate-limited for {pair} — falling back to yfinance")
+            else:
+                logger.debug(f"Alpaca crypto bars {pair}: HTTP {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"Alpaca crypto bars ({pair}): {e}")
+
+        # ── Method 2: yfinance fallback (15-min delayed) ────────────────────────
         try:
             import yfinance as yf
             ticker_map = {
                 "BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD", "SOL/USD": "SOL-USD",
                 "DOGE/USD": "DOGE-USD", "LINK/USD": "LINK-USD", "AAVE/USD": "AAVE-USD",
                 "LTC/USD":  "LTC-USD",  "BCH/USD":  "BCH-USD",
+                "XRP/USD":  "XRP-USD",  "SHIB/USD": "SHIB-USD",
             }
             interval_map = {"1Min": "1m", "5Min": "5m", "15Min": "15m", "1Hour": "60m", "1Day": "1d"}
             yf_sym   = ticker_map.get(pair, pair.replace("/", "-"))
@@ -170,40 +217,12 @@ class AlpacaClient:
                 available = [c for c in ["open","high","low","close","volume"] if c in df.columns]
                 if len(available) >= 4:
                     result = df[available].tail(limit).copy()
-                    logger.info(f"Crypto bars {pair} via yfinance: {len(result)} rows, last close=${result['close'].iloc[-1]:.2f}")
+                    logger.info(f"Crypto bars {pair} via yfinance fallback: {len(result)} rows")
                     return result
         except ImportError:
             logger.warning("yfinance not installed — run: pip install yfinance")
         except Exception as e:
-            logger.warning(f"yfinance error ({pair}): {e}")
-
-        # Method 2: Alpaca v1beta3 (requires paid plan)
-        import requests as _req
-        try:
-            api_key    = getattr(self, "api_key", None) or getattr(self, "key", "")
-            secret_key = getattr(self, "secret_key", None) or getattr(self, "secret", "")
-            if not api_key:
-                import config as _cfg
-                api_key, secret_key = _cfg.ALPACA_API_KEY, _cfg.ALPACA_SECRET_KEY
-            tf_map = {"1Min": "1Min", "5Min": "5Min", "15Min": "15Min", "1Hour": "1Hour", "1Day": "1Day"}
-            resp = _req.get(
-                "https://data.alpaca.markets/v1beta3/crypto/us/bars",
-                params={"symbols": pair, "timeframe": tf_map.get(timeframe,"1Min"), "limit": limit, "sort": "asc"},
-                headers={"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret_key},
-                timeout=10
-            )
-            if resp.status_code == 200:
-                bars_data = resp.json().get("bars", {}).get(pair, [])
-                if bars_data and len(bars_data) > 3:
-                    df = pd.DataFrame(bars_data).rename(
-                        columns={"t":"timestamp","o":"open","h":"high","l":"low","c":"close","v":"volume"})
-                    df["timestamp"] = pd.to_datetime(df["timestamp"])
-                    df = df.set_index("timestamp")
-                    available = [c for c in ["open","high","low","close","volume"] if c in df.columns]
-                    logger.info(f"Crypto bars {pair} via Alpaca: {len(df)} rows")
-                    return df[available].copy()
-        except Exception as e:
-            logger.debug(f"Alpaca crypto bars ({pair}): {e}")
+            logger.warning(f"yfinance fallback error ({pair}): {e}")
 
         return pd.DataFrame()
 

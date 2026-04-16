@@ -127,16 +127,39 @@ def snapshot_today(db: Session, user_id: int, broker=None) -> DailyPnL:
     prior = _compound_before(db, user_id, day)
     row.compound_total = prior + (row.realized_pnl or 0.0)
 
-    # Compound % vs. starting capital — use the user's configured capital as the base
+    # Compound % vs. starting capital. Primary: User.capital column. Fallback:
+    # legacy user_settings.json (older installs stored capital there, not on the
+    # User row). Without this fallback, compound_pct renders as 0% on the UI.
     try:
         user = db.query(User).filter(User.id == user_id).one_or_none()
         base = float(user.capital) if user and user.capital else 0.0
-        row.compound_pct = (row.compound_total / base * 100.0) if base > 0 else 0.0
+        if base <= 0:
+            try:
+                import json, os
+                settings_path = os.path.join(os.path.dirname(__file__), "..", "user_settings.json")
+                if os.path.exists(settings_path):
+                    with open(settings_path, "r") as f:
+                        base = float(json.load(f).get("capital", 0) or 0)
+            except Exception:
+                pass
+        if base <= 0:
+            base = 5000.0  # last-resort default to avoid div-by-zero
+        row.compound_pct = (row.compound_total / base * 100.0)
     except Exception:
         row.compound_pct = 0.0
 
     db.commit()
     db.refresh(row)
+
+    # --- Protection: ratchet the account-level floor on every snapshot ------
+    # Monotonic — floor only ever goes UP. This locks in `lock_pct` of every
+    # $milestone_size of compound realized as permanent, unlosable capital.
+    try:
+        from services import protection_service
+        protection_service.ratchet_floor(db, user_id, float(row.compound_total or 0.0))
+    except Exception as e:
+        logger.warning(f"snapshot_today: ratchet_floor failed: {e}")
+
     return row
 
 

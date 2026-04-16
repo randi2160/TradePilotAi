@@ -480,13 +480,19 @@ export default function Dashboard({ data }) {
   const capital   = parseFloat(data.capital       ?? data.settings?.capital ?? 5000)
   const winRate   = parseFloat(data.win_rate      ?? todayStats?.win_rate   ?? 0)
   const trades    = data.trade_count ?? todayStats?.trade_count ?? 0
-  const equity    = capital + pnl
   const positions = data.positions ?? []
   const signals   = data.signals   ?? []
   const dualOn    = dualSummary?.initialized
   const combinedPnl = dualOn ? parseFloat(dualSummary.total_pnl ?? pnl) : pnl
   const activeSignals = signals.filter(s => s.signal !== 'HOLD' && s.signal !== 'WAIT')
-  const totalReturn = capital > 0 ? ((equity - capital) / capital * 100).toFixed(2) : '0.00'
+
+  // Portfolio value = starting capital + ALL-TIME realized (compound) + today's
+  // unrealized. Equity only moves permanently on realized gains; unrealized is
+  // the floating portion that will either book as realized or give back.
+  const compoundAll   = parseFloat(dayPnl?.compound_total || 0)
+  const unrealizedAll = parseFloat(dayPnl?.unrealized_pnl || 0)
+  const equity        = capital + compoundAll + unrealizedAll
+  const totalReturn   = capital > 0 ? ((capital + compoundAll - capital) / capital * 100).toFixed(2) : '0.00'
 
   return (
     <div className="space-y-5">

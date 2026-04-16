@@ -111,6 +111,19 @@ class Trade(Base):
     closed_at       = Column(DateTime,    nullable=True)
     trade_date      = Column(String(10),  nullable=True)   # YYYY-MM-DD for daily grouping
 
+    # ── Ladder protection (per-position trailing + scale-out) ──────────────────
+    # Tracks the highest unrealized gain each position has ever seen so we can
+    # trail from the peak instead of the current price. Updated live by
+    # services.ladder_service every protection tick while status=='open'.
+    original_qty         = Column(Float,    nullable=True)   # qty at entry, before any scale-outs
+    peak_price           = Column(Float,    nullable=True)   # highest price seen since open (for LONG)
+    peak_unrealized_pct  = Column(Float,    default=0.0)     # highest gain % reached (0.10 = +10%)
+    peak_unrealized_pnl  = Column(Float,    default=0.0)     # highest $ gain reached
+    trail_stop_pct       = Column(Float,    nullable=True)   # computed trail (as gain %) — closes below this
+    last_peak_at         = Column(DateTime, nullable=True)   # last time we made a new high
+    scaled_out_pct       = Column(Float,    default=0.0)     # fraction of original_qty already scaled out (0.0-1.0)
+    scaleout_levels_hit  = Column(JSON,     default=list)    # list of milestone % already triggered e.g. [0.05, 0.10]
+
     user            = relationship("User", back_populates="trades")
 
     __table_args__ = (
@@ -176,6 +189,65 @@ class DailyPnL(Base):
     __table_args__ = (
         Index("ix_daily_pnl_user_date", "user_id", "trade_date", unique=True),
     )
+
+
+class ProtectionSettings(Base):
+    """
+    Account-level gain-protection rules for a user.
+
+    Three layers work together to keep profits:
+
+      1) INTRADAY floor (handled in strategy/daily_target.py + crypto_engine.py)
+         — protects today's floating profit within a single session.
+
+      2) HARVEST rule (this table + protection_service.harvest_positions)
+         — converts large unrealized winners into realized so they count toward
+         compound and push the account floor up. Without this, a $1,500
+         unrealized day could evaporate and never raise the account floor.
+
+      3) ACCOUNT floor (this table + protection_service.ratchet_floor)
+         — monotonic floor that climbs as compound_total grows. If live equity
+         ever drops below it, the breach_action fires (halt / close / alert).
+
+    One row per user. Auto-created on first access with sensible defaults.
+    """
+    __tablename__ = "protection_settings"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    enabled     = Column(Boolean, default=True)
+
+    # Account floor config
+    floor_value           = Column(Float, default=5000.0)  # current locked floor (monotonic)
+    initial_capital       = Column(Float, default=5000.0)  # snapshot of base at init — "never below this"
+    milestone_size        = Column(Float, default=100.0)   # raise floor every $N of compound gain
+    lock_pct              = Column(Float, default=0.70)    # % of each milestone permanently locked
+
+    # Harvest config
+    harvest_position_pct  = Column(Float, default=0.08)    # force-close a position at this unrealized gain
+    harvest_portfolio_cap = Column(Float, default=500.0)   # or when total unrealized exceeds this
+
+    # Ladder config — per-position trailing + scale-out
+    # Tiers are hardcoded in services/ladder_service.LADDER_TIERS. These flags
+    # just toggle whether the ladder runs at all, and the scale-out fractions.
+    ladder_enabled        = Column(Boolean, default=True)
+    scaleout_enabled      = Column(Boolean, default=True)
+    scaleout_milestones   = Column(JSON,    default=lambda: [0.05, 0.10, 0.15])  # fire at +5/+10/+15 %
+    scaleout_fraction     = Column(Float,   default=0.25)   # sell 25% of original qty at each milestone
+    concentration_pct     = Column(Float,   default=0.30)   # bump tier when a position > 30% of equity
+    time_decay_hours      = Column(Float,   default=4.0)    # bump tier if no new peak for N hours
+
+    # Breach behavior
+    breach_action         = Column(String(20), default="halt_close")  # halt_close|halt_only|alert_only
+
+    # State tracking
+    last_ratchet_at       = Column(DateTime, nullable=True)
+    last_breach_at        = Column(DateTime, nullable=True)
+    last_harvest_at       = Column(DateTime, nullable=True)
+    peak_compound         = Column(Float, default=0.0)     # high-water mark of compound_total
+
+    created_at            = Column(DateTime, default=datetime.utcnow)
+    updated_at            = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Watchlist(Base):

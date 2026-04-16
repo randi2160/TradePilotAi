@@ -20,37 +20,25 @@ from typing     import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
-# Full scan universe — used for momentum discovery (yfinance, not traded)
-# Full universe — scanned via Binance every cycle
-CRYPTO_UNIVERSE = [
-    "BTC", "ETH", "SOL", "DOGE", "LINK", "AAVE",
-    "LTC", "BCH", "AVAX", "XRP", "ADA", "DOT",
-    "ATOM", "ALGO", "NEAR", "SAND", "MANA",
-    "CRV", "SUSHI", "BAT", "ZEC", "DASH", "ETC",
-    "SHIB", "FIL",
-]
-
-# Alpaca paper trading ONLY supports these crypto symbols
+# Alpaca paper trading ONLY supports these crypto symbols.
+# If Alpaca adds more pairs, add them here and they will automatically be
+# included in scans.
 ALPACA_TRADEABLE = {
     "BTC", "ETH", "LTC", "BCH", "DOGE",
     "LINK", "AAVE", "SOL", "XRP", "SHIB",
 }
 
-# Import Binance scanner — try multiple import paths (works on Windows + Linux)
-BINANCE_AVAILABLE = False
-_binance_scan  = None
-_binance_price = None
-try:
-    from data.binance_scanner import scan_all_coins as _binance_scan, get_live_price as _binance_price
-    BINANCE_AVAILABLE = True
-except ImportError:
-    try:
-        import sys, os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'data'))
-        from binance_scanner import scan_all_coins as _binance_scan, get_live_price as _binance_price
-        BINANCE_AVAILABLE = True
-    except ImportError:
-        logger.warning("Binance scanner not available — using yfinance fallback")
+# Scan universe = only coins we can actually trade.
+# Previously we scanned 25 coins but 15 of them (ADA, DOT, ATOM, ALGO, NEAR,
+# SAND, MANA, CRV, SUSHI, BAT, ZEC, DASH, ETC, AVAX, FIL) couldn't be executed
+# on Alpaca paper — they just burned scan cycles and Binance API calls.
+# Broader momentum discovery for watchlist suggestions lives elsewhere
+# (/api/ai/watchlist-suggest); the trading engine focuses on what it can act on.
+CRYPTO_UNIVERSE = sorted(ALPACA_TRADEABLE)
+
+# Binance scanner was removed: AWS US IPs get HTTP 451 geo-blocked.
+# All crypto data now flows through Alpaca v1beta3 (broker.get_crypto_bars),
+# which is free on the Basic tier and matches the execution feed.
 
 
 class EngineState(Enum):
@@ -777,10 +765,33 @@ class CryptoEngine:
             except Exception:
                 pass
 
-            # Stop/target from ACTUAL fill price (not yfinance estimate)
-            stop   = round(actual_price * 0.997, 6)   # 0.3% stop
-            target = round(actual_price * 1.003, 6)   # 0.3% target
-            logger.info(f"Fill: {ticker} @ ${actual_price:.4f} | stop=${stop:.4f} target=${target:.4f}")
+            # Stop/target anchored to ACTUAL fill price but using the ATR-based
+            # distances the scanner produced. Previously we forced a symmetric
+            # ±0.3% bracket here, which ignored the scanner's expected_move and
+            # capped winners while letting losers run to 0.3% — asymmetric loss
+            # profile. Now honor sizing["stop_dist"] and candidate["expected_move"].
+            stop_dist     = float(sizing.get("stop_dist") or 0.0)
+            expected_move = float(best.get("expected_move") or 0.0)
+
+            # Fallbacks if either is missing/zero
+            if stop_dist <= 0:
+                stop_dist = max(actual_price * 0.003, 0.01)
+            if expected_move <= 0:
+                expected_move = stop_dist * 1.5
+
+            # Alpaca minimum: stop at least 0.1% or $0.01 below entry
+            min_stop_dist = max(actual_price * 0.001, 0.01)
+            stop_dist     = max(stop_dist, min_stop_dist)
+
+            stop   = round(actual_price - stop_dist, 6)
+            target = round(actual_price + expected_move, 6)
+            rr     = (expected_move / stop_dist) if stop_dist > 0 else 0
+            logger.info(
+                f"Fill: {ticker} @ ${actual_price:.4f} | "
+                f"stop=${stop:.4f} (-{stop_dist:.4f}) "
+                f"target=${target:.4f} (+{expected_move:.4f}) "
+                f"R:R={rr:.2f}"
+            )
 
             # Refresh account after fill
             self.state = EngineState.FUNDS_REFRESHING
@@ -837,74 +848,53 @@ class CryptoEngine:
         return self.status()
 
     async def _scan_candidates(self) -> List[dict]:
-        import asyncio
+        """
+        Scan the tradeable universe for momentum setups.
 
-        loop    = asyncio.get_event_loop()
-        t0      = loop.time()
+        Primary: Alpaca v1beta3 /crypto/us/bars — FREE, real-time, same feed
+        the executor uses. Parallel fetch across the universe (10 coins).
+        Fallback: yfinance batch — only used if Alpaca returns nothing for a
+        coin (e.g., transient outage). 15-min delayed but keeps us scanning.
 
-        # Check if Binance is geo-blocked (AWS US servers get 451)
-        _binance_ok = BINANCE_AVAILABLE
-        if _binance_ok:
+        Binance was removed: AWS US IPs get HTTP 451 geo-blocked and the
+        retries added latency for no benefit.
+        """
+        import asyncio, math, pandas as pd
+
+        loop = asyncio.get_event_loop()
+        t0   = loop.time()
+
+        # ── Primary: Alpaca parallel fetch ─────────────────────────────────────
+        def _fetch_one(ticker: str):
             try:
-                from data.binance_scanner import BINANCE_BLOCKED as _bb
-                if _bb:
-                    _binance_ok = False
-                    logger.info("Binance geo-blocked — using yfinance fallback")
-            except ImportError:
-                pass
+                bars = self.broker.get_crypto_bars(ticker, "1Min", 60)
+                if bars is None or bars.empty or len(bars) < 10:
+                    return (ticker, None)
+                return (ticker, bars)
+            except Exception as e:
+                logger.debug(f"  Alpaca fetch {ticker}: {e}")
+                return (ticker, None)
 
-        if _binance_ok:
-            # Binance: ~200-400ms, real-time prices, no auth needed
-            results  = await loop.run_in_executor(None, _binance_scan, CRYPTO_UNIVERSE)
-            elapsed  = loop.time() - t0
-            logger.info(f"🤖 Binance scan: {len(results)}/{len(CRYPTO_UNIVERSE)} coins in {elapsed:.1f}s")
+        # Run all fetches in parallel via the thread pool (I/O bound HTTP calls)
+        tasks   = [loop.run_in_executor(None, _fetch_one, t) for t in CRYPTO_UNIVERSE]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
 
-            # Convert Binance results to engine candidate format
-            candidates = []
-            for r in results:
-                try:
-                    ticker = r["ticker"]
-                    price  = r["price"]
-                    # Build a minimal bars-compatible scored dict
-                    # using score_crypto_candidate style output from Binance
-                    scored = {
-                        "symbol":      f"{ticker}/USD",
-                        "ticker":      ticker,
-                        "price":       price,
-                        "score":       r.get("score", 0),
-                        "probability": r.get("confidence", 50) / 100,
-                        "momentum":    r.get("momentum", 0),
-                        "vol_ratio":   r.get("vol_spike", 1),
-                        "atr":         r.get("atr", price * 0.005),
-                        "atr_pct":     r.get("atr", price * 0.005) / price * 100 if price > 0 else 0,
-                        "trend_up":    r.get("momentum", 0) > 0,
-                        "expected_move": r.get("atr", price * 0.005) * 1.5,
-                        "exp_profit":  0.25,
-                        "valid":       r.get("confidence", 0) >= self.min_probability * 100,
-                        "entry":       r.get("entry", price),
-                        "exit_target": r.get("exit_target", price),
-                        "stop":        r.get("stop", price),
-                        "change_24h":  r.get("change_24h", 0),
-                        "source":      "binance",
-                    }
-                    candidates.append(scored)
-                except Exception as e:
-                    logger.debug(f"Binance result parse {r.get('ticker','?')}: {e}")
+        bars_map = {t: b for (t, b) in results if b is not None}
+        alpaca_hits = len(bars_map)
+        elapsed     = loop.time() - t0
+        logger.info(f"🤖 Alpaca crypto scan: {alpaca_hits}/{len(CRYPTO_UNIVERSE)} coins in {elapsed:.1f}s")
 
-        else:
-            # Fallback: yfinance batch (slower but no external dependency)
-            import yfinance as yf
-            import pandas as pd
-            import numpy as np
-            import math
-
+        # ── Fallback: yfinance batch for any coins Alpaca missed ───────────────
+        missing = [t for t in CRYPTO_UNIVERSE if t not in bars_map]
+        if missing:
             def _yf_batch():
-                yf_syms = [f"{t}-USD" for t in CRYPTO_UNIVERSE]
                 try:
-                    df = yf.download(yf_syms, period="1d", interval="5m",
+                    import yfinance as yf
+                    yf_syms = [f"{t}-USD" for t in missing]
+                    df = yf.download(yf_syms, period="1d", interval="1m",
                                      progress=False, auto_adjust=True, group_by="ticker")
-                    result = {}
-                    for ticker in CRYPTO_UNIVERSE:
+                    fallback = {}
+                    for ticker in missing:
                         yf_sym = f"{ticker}-USD"
                         try:
                             if isinstance(df.columns, pd.MultiIndex):
@@ -913,44 +903,46 @@ class CryptoEngine:
                                     continue
                                 sub = df[yf_sym].copy()
                             else:
-                                sub = df.copy()
+                                sub = df.copy() if len(missing) == 1 else None
+                                if sub is None:
+                                    continue
                             sub.columns = [c.lower() for c in sub.columns]
-                            if "close" not in sub.columns or len(sub) < 5:
+                            if "close" not in sub.columns:
                                 continue
                             sub = sub.dropna(subset=["close"])
-                            if len(sub) < 5:
+                            if len(sub) < 10:
                                 continue
                             last_price = float(sub["close"].iloc[-1])
-                            # Skip if price is NaN, 0, or infinite
                             if math.isnan(last_price) or last_price <= 0 or math.isinf(last_price):
-                                logger.debug(f"  Skipping {ticker}: invalid price {last_price}")
                                 continue
-                            result[ticker] = sub
+                            fallback[ticker] = sub
                         except Exception:
                             continue
-                    return result
+                    return fallback
                 except Exception as e:
-                    logger.warning(f"yfinance fallback: {e}")
+                    logger.debug(f"yfinance fallback batch: {e}")
                     return {}
 
-            bars_map = await loop.run_in_executor(None, _yf_batch)
-            elapsed  = loop.time() - t0
-            logger.info(f"🤖 yfinance fallback: {len(bars_map)}/{len(CRYPTO_UNIVERSE)} coins in {elapsed:.1f}s")
+            yf_map = await loop.run_in_executor(None, _yf_batch)
+            if yf_map:
+                logger.info(f"🔁 yfinance fallback recovered {len(yf_map)}/{len(missing)} coins")
+                bars_map.update(yf_map)
 
-            candidates = []
-            for ticker, bars in bars_map.items():
-                try:
-                    import math
-                    symbol = f"{ticker}/USD"
-                    price  = float(bars["close"].iloc[-1])
-                    if math.isnan(price) or price <= 0:
-                        continue
-                    scored = self.score_crypto_candidate(symbol, bars)
-                    scored["ticker"] = ticker
-                    scored["price"]  = price
-                    candidates.append(scored)
-                except Exception as e:
-                    logger.debug(f"  Score {ticker}: {e}")
+        # ── Score every coin we have bars for ──────────────────────────────────
+        candidates: List[dict] = []
+        for ticker, bars in bars_map.items():
+            try:
+                symbol = f"{ticker}/USD"
+                price  = float(bars["close"].iloc[-1])
+                if math.isnan(price) or price <= 0:
+                    continue
+                scored = self.score_crypto_candidate(symbol, bars)
+                scored["ticker"] = ticker
+                scored["price"]  = price
+                scored["source"] = "alpaca" if ticker in {t for (t, b) in results if b is not None} else "yfinance"
+                candidates.append(scored)
+            except Exception as e:
+                logger.debug(f"  Score {ticker}: {e}")
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
@@ -991,15 +983,12 @@ class CryptoEngine:
         for sym, pos in list(self.open_positions.items()):
             ticker = sym.split("/")[0]
             try:
-                # Priority: Binance (fastest) → Alpaca quote → yfinance
+                # Priority: Alpaca crypto quote → Alpaca stock-style quote fallback
                 current_price = 0.0
-                if BINANCE_AVAILABLE:
-                    current_price = _binance_price(ticker)
+                if hasattr(self.broker, "get_latest_crypto_price"):
+                    current_price = self.broker.get_latest_crypto_price(ticker)
                 if current_price <= 0:
-                    if hasattr(self.broker, "get_latest_crypto_price"):
-                        current_price = self.broker.get_latest_crypto_price(ticker)
-                    else:
-                        current_price = self.broker.get_latest_price(ticker)
+                    current_price = self.broker.get_latest_price(ticker)
                 if current_price <= 0:
                     continue
 

@@ -861,10 +861,22 @@ async def get_optimizer_status(
     db:   Session = Depends(get_db),
 ):
     """Current portfolio optimizer state — account + goal + trade budget."""
-    account = _get_account_info(user, db)
+    account = _get_account_info(user, db) or {}
     goal    = _get_daily_goal(user)
-    dt_remain = account.get("day_trades_remaining", 3)
-    pdt_exempt = account.get("is_pdt_exempt", False)
+    # Coerce every numeric field defensively — Alpaca can return None for
+    # buying_power / daytrade_count while paper-restricted or during auth errors.
+    def _f(key, default=0.0):
+        v = account.get(key, default)
+        try: return float(v) if v is not None else float(default)
+        except Exception: return float(default)
+    def _i(key, default=0):
+        v = account.get(key, default)
+        try: return int(v) if v is not None else int(default)
+        except Exception: return int(default)
+
+    buying_power = _f("buying_power", 0.0)
+    dt_remain    = _i("day_trades_remaining", 3)
+    pdt_exempt   = bool(account.get("is_pdt_exempt", False))
     return {
         "date":              today(),
         "account":           account,
@@ -872,10 +884,10 @@ async def get_optimizer_status(
         "trade_budget": {
             "max_day_trades":   999 if pdt_exempt else dt_remain,
             "pdt_exempt":       pdt_exempt,
-            "buying_power":     account.get("buying_power", 0),
-            "per_trade_max":    round(account.get("buying_power", 0) * 0.15, 2),
+            "buying_power":     buying_power,
+            "per_trade_max":    round(buying_power * 0.15, 2),
             "crypto_exempt":    True,
-            "daytrade_count":   account.get("daytrade_count", 0),
+            "daytrade_count":   _i("daytrade_count", 0),
         },
         "min_confidence":    int(_get_setting(db, "alert_confidence_min", 65)),
     }
