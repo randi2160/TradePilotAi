@@ -1,0 +1,25 @@
+{
+  "capital": 5000.0,
+  "daily_target_min": 100.0,
+  "daily_target_max": 250.0,
+  "max_daily_loss": 150.0,
+  "watchlist": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "TSLA",
+    "AMD",
+    "SPY",
+    "QQQ",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "NFLX",
+    "COIN",
+    "MSTR",
+    "PLTR",
+    "SOFI"
+  ],
+  "equity_history": [],
+  "updated_at": "2026-04-16T01:27:43.260196"
+}
