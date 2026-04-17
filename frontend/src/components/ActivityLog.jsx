@@ -60,9 +60,12 @@ export default function ActivityLog() {
     a.click()
   }
 
+  const todayStr = new Date().toISOString().slice(0, 10)
   const todayTrades = trades.filter(t => {
-    const d = new Date(t.opened_at ?? '').toDateString()
-    return d === new Date().toDateString()
+    // Use trade_date (YYYY-MM-DD) if available, fall back to opened_at
+    if (t.trade_date) return t.trade_date === todayStr
+    const opened = t.opened_at ?? ''
+    return opened.startsWith(todayStr)
   })
 
   const s   = report?.summary ?? {}
