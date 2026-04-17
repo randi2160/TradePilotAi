@@ -25,7 +25,7 @@ from database.models   import User
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/daily", tags=["Daily Advisor"])
 
-CRYPTO_SYMBOLS = {'BTC','ETH','LTC','BCH','LINK','AAVE','UNI','DOGE','SHIB','MATIC','SOL','ADA','XRP'}
+CRYPTO_SYMBOLS = {'BTC','ETH','LTC','BCH','LINK','AAVE','UNI','DOGE','SHIB','SOL','ADA','XRP'}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

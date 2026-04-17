@@ -139,7 +139,7 @@ function TradingApp() {
   if (loading) return (
     <div className="min-h-screen bg-dark-900 flex items-center justify-center">
       <div className="text-center">
-        <div className="text-4xl mb-3 animate-pulse">📈</div>
+        <img src="/logo-mark.png" alt="Morviq AI" className="w-16 h-16 mx-auto mb-3 animate-pulse object-contain"/>
         <p className="text-gray-400">Loading Morviq AI…</p>
       </div>
     </div>
@@ -190,9 +190,9 @@ function TradingApp() {
 
       {/* Header */}
       <header className="bg-dark-800 border-b border-dark-600 px-4 py-2.5 flex items-center gap-3 flex-shrink-0">
-        <img src="/logo-mark.svg" alt="Morviq AI" className="w-8 h-8 flex-shrink-0"/>
+        <img src="/logo-mark.png" alt="Morviq AI" className="w-10 h-10 flex-shrink-0 object-contain"/>
         <div className="hidden sm:block">
-          <img src="/logo.svg" alt="Morviq AI — AI That Trades. Wealth That Grows." className="h-8 w-auto"/>
+          <img src="/logo.png" alt="Morviq AI — AI That Trades. Wealth That Grows." className="h-10 w-auto object-contain"/>
         </div>
         {/* Today settled (realized) — persists across restart via DailyPnL table */}
         <div title="Realized P&L — settled closed trades today"

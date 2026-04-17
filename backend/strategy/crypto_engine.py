@@ -34,7 +34,7 @@ ALPACA_TRADEABLE = {
 _EXTENDED_CANDIDATES = [
     "BTC", "ETH", "LTC", "BCH", "DOGE", "LINK", "AAVE", "SOL", "XRP", "SHIB",
     "UNI", "SUSHI", "CRV", "MKR", "COMP", "GRT", "BAT", "YFI", "SNX",
-    "AVAX", "MATIC", "DOT", "ATOM", "ALGO", "NEAR", "FIL", "ETC",
+    "AVAX", "DOT", "ATOM", "ALGO", "NEAR", "FIL", "ETC",
     "ADA", "MANA", "SAND", "APE", "LDO", "OP", "ARB", "PEPE", "WIF",
     "FET", "RNDR", "INJ", "TIA", "SEI", "SUI", "JUP", "BONK",
 ]

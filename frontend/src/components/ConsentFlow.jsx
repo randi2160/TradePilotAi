@@ -53,7 +53,7 @@ function WelcomeStep({ onNext }) {
     <div className="space-y-6 text-center">
       <div className="flex justify-center">
         <div className="w-20 h-20 rounded-2xl bg-brand-500/20 flex items-center justify-center">
-          <img src="/logo-mark.svg" alt="Morviq AI" className="w-12 h-12" onError={e => { e.target.style.display='none' }}/>
+          <img src="/logo-mark.png" alt="Morviq AI" className="w-12 h-12 object-contain" onError={e => { e.target.style.display='none' }}/>
           <Shield size={36} className="text-brand-500"/>
         </div>
       </div>

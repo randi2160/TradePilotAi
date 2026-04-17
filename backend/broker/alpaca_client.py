@@ -318,7 +318,7 @@ class AlpacaClient:
         return s
 
     def _is_crypto(self, symbol: str) -> bool:
-        CRYPTO = {"BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH","UNI","ADA","MATIC","XRP"}
+        CRYPTO = {"BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH","UNI","ADA","XRP"}
         base = symbol.upper().split("/")[0].split("-")[0]
         return base in CRYPTO
 

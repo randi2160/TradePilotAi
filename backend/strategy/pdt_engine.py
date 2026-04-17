@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Symbols exempt from PDT (crypto on Alpaca)
 CRYPTO_SYMBOLS = {
     'BTC', 'ETH', 'LTC', 'BCH', 'LINK', 'AAVE', 'UNI',
-    'BAT', 'CRV', 'GRT', 'MKR', 'MATIC', 'SHIB', 'DOGE',
+    'BAT', 'CRV', 'GRT', 'MKR', 'SHIB', 'DOGE',
     'BTCUSD', 'ETHUSD', 'LTCUSD',
 }
 

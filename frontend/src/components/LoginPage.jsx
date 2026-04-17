@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
-import { TrendingUp, Eye, EyeOff, Loader } from 'lucide-react'
+import { Eye, EyeOff, Loader } from 'lucide-react'
 
 export default function LoginPage() {
   const { login, register } = useAuth()
@@ -41,9 +41,8 @@ export default function LoginPage() {
 
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="text-5xl mb-3">📈</div>
-          <h1 className="text-2xl font-black text-white">AutoTrader Pro</h1>
-          <p className="text-gray-400 text-sm mt-1">AI-Powered Stock Trading Platform</p>
+          <img src="/logo.png" alt="Morviq AI" className="w-80 mx-auto mb-4"/>
+          <p className="text-gray-400 text-sm mt-1">AI-Powered Trading Platform</p>
         </div>
 
         {/* Card */}
@@ -141,7 +140,7 @@ export default function LoginPage() {
         </div>
 
         <p className="text-center text-xs text-gray-600 mt-6">
-          Paper trading by default · Not financial advice · Trade responsibly
+          Morviq AI · Paper trading by default · Not financial advice
         </p>
       </div>
     </div>
