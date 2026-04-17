@@ -770,6 +770,7 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
             if crypto_positions:
                 logger.info(f"║  [4] Reconciling {len(crypto_positions)} open crypto positions ({_t.time()-t4:.2f}s)")
                 if _hybrid_engine.crypto_engine:
+                    existing = _hybrid_engine.crypto_engine.open_positions
                     for p in crypto_positions:
                         sym_raw = str(p.get("symbol",""))
                         ticker  = sym_raw.replace("USD","").replace("/","")
@@ -778,15 +779,38 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
                         entry   = float(p.get("avg_entry_price", p.get("current_price", 0)))
                         current = float(p.get("current_price", entry))
                         upnl    = float(p.get("unrealized_pl", 0))
+                        # Skip if already tracked — avoid duplicate ghost entries on restart
+                        if symbol in existing:
+                            logger.info(f"║     ⏭ {symbol} already tracked — skipping reconcile")
+                            continue
+                        if qty <= 0:
+                            logger.info(f"║     ⏭ {symbol} qty=0 — skipping")
+                            continue
                         pos = CryptoPosition(
                             symbol=symbol, side="BUY", qty=qty,
                             entry=entry, stop=entry*0.98, target=entry*1.02,
                         )
-                        _hybrid_engine.crypto_engine.open_positions[symbol] = pos
+                        existing[symbol] = pos
                         logger.info(f"║     → {symbol} qty={qty} entry=${entry:.4f} upnl=${upnl:+.2f}")
-                    _hybrid_engine.crypto_engine.state = EngineState.POSITION_OPEN
+                    # Reverse check: remove ghost positions the engine tracks but Alpaca doesn't have
+                    alpaca_syms = set()
+                    for p in crypto_positions:
+                        sym_raw = str(p.get("symbol",""))
+                        ticker  = sym_raw.replace("USD","").replace("/","")
+                        alpaca_syms.add(f"{ticker}/USD")
+                    ghosts = [s for s in existing if s not in alpaca_syms]
+                    for g in ghosts:
+                        del existing[g]
+                        logger.info(f"║     🗑 {g} not on Alpaca — removed ghost position")
+                    if existing:
+                        _hybrid_engine.crypto_engine.state = EngineState.POSITION_OPEN
             else:
                 logger.info(f"║  [4] No existing crypto positions to reconcile ({_t.time()-t4:.2f}s)")
+                # No crypto on Alpaca — clear any ghost positions from engine
+                if _hybrid_engine.crypto_engine and _hybrid_engine.crypto_engine.open_positions:
+                    ghost_count = len(_hybrid_engine.crypto_engine.open_positions)
+                    _hybrid_engine.crypto_engine.open_positions.clear()
+                    logger.info(f"║  [4] Cleared {ghost_count} ghost positions — Alpaca has none")
         except Exception as e:
             logger.error(f"║  [4] Position reconciliation error: {e}")
 

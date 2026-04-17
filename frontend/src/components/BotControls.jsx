@@ -26,15 +26,21 @@ function CryptoEnginePanel({ settings }) {
 
   async function startCrypto() {
     setLoading(true)
+    setMsg('⏳ Starting engine — this can take a few seconds…')
     try {
       const r = await api.post('/bot/engine-mode', {
         mode:         savedMode === 'stocks_only' ? 'hybrid' : savedMode,
         crypto_alloc: settings?.crypto_alloc_pct || 0.30,
-      })
+      }, { timeout: 30000 })
       setMsg('✅ ' + r.data.message)
-      loadStatus()
+      // Update running state immediately from response, then refresh full status
+      if (r.data.crypto_running) {
+        setStatus(prev => ({ ...prev, crypto_running: true }))
+      }
+      await loadStatus()
     } catch (e) {
-      setMsg('❌ ' + (e.response?.data?.detail || e.message))
+      const detail = e.response?.data?.detail || e.message
+      setMsg('❌ ' + (e.code === 'ECONNABORTED' ? 'Request timed out — check AWS logs' : detail))
     } finally {
       setLoading(false)
     }
