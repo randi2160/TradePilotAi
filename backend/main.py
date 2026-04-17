@@ -182,6 +182,7 @@ def get_user_bot(user) -> BotLoop:
             capital          = settings.get_capital(),
             daily_target_min = settings.get_targets()["daily_target_min"],
             daily_target_max = settings.get_targets()["daily_target_max"],
+            max_daily_loss   = settings.get_targets()["max_daily_loss"],
             user_id          = user.id,
         )
         bot = BotLoop(t, user_id=user.id)
@@ -951,7 +952,14 @@ async def get_status(user: User = Depends(get_current_user)):
     else:
         # No bot ever started for this user — return a zeroed stats shape
         # from a throwaway tracker so the UI has a consistent schema.
-        _t = DailyTargetTracker(user_id=user.id)
+        _tgt = settings.get_targets()
+        _t = DailyTargetTracker(
+            capital=settings.get_capital(),
+            daily_target_min=_tgt["daily_target_min"],
+            daily_target_max=_tgt["daily_target_max"],
+            max_daily_loss=_tgt["max_daily_loss"],
+            user_id=user.id,
+        )
         s = {
             **_t.stats(),
             "bot_status":        "stopped",
@@ -1777,8 +1785,14 @@ async def update_targets(body: TargetsBody,
     settings.set_targets(body.daily_target_min, body.daily_target_max, body.max_daily_loss)
     user_bot = get_user_bot_if_exists(user.id)
     if user_bot is not None:
-        user_bot.tracker.target_min = body.daily_target_min
-        user_bot.tracker.target_max = body.daily_target_max
+        user_bot.tracker.target_min     = body.daily_target_min
+        user_bot.tracker.target_max     = body.daily_target_max
+        user_bot.tracker.max_daily_loss = body.max_daily_loss
+        # Also sync risk manager's daily loss limit
+        if hasattr(user_bot, 'risk'):
+            user_bot.risk.daily_loss_lim = body.max_daily_loss
+            user_bot.risk.capital        = settings.get_capital()
+        logger.info(f"Tracker+Risk updated: targets={body.daily_target_min}-{body.daily_target_max}, max_loss={body.max_daily_loss}")
     user.daily_target_min   = body.daily_target_min
     user.daily_target_max   = body.daily_target_max
     user.max_daily_loss     = body.max_daily_loss

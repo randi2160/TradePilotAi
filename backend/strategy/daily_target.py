@@ -19,11 +19,13 @@ class DailyTargetTracker:
         capital:          float = config.CAPITAL,
         daily_target_min: float = config.DAILY_TARGET_MIN,
         daily_target_max: float = config.DAILY_TARGET_MAX,
+        max_daily_loss:   float = config.MAX_DAILY_LOSS,
         user_id:          Optional[int] = None,
     ):
         self.capital          = capital
         self.target_min       = daily_target_min
         self.target_max       = daily_target_max
+        self.max_daily_loss   = max_daily_loss
         # Per-user scoping for DB reads. When set, load_from_db filters
         # trades by this user_id so each user's bot tracks only its own P&L.
         self.user_id          = user_id
@@ -217,7 +219,7 @@ class DailyTargetTracker:
     def should_stop(self) -> tuple[bool, str]:
         self._guard()
         pnl = self.realized_pnl
-        max_loss = config.MAX_DAILY_LOSS
+        max_loss = self.max_daily_loss
 
         # Hard loss limit
         if pnl <= -max_loss:
@@ -257,6 +259,7 @@ class DailyTargetTracker:
             "total_pnl":        self.total_pnl(),
             "target_min":       self.target_min,
             "target_max":       self.target_max,
+            "max_daily_loss":   self.max_daily_loss,
             "progress_pct":     self.progress_pct(),
             "min_target_hit":   self.is_min_target_hit(),
             "max_target_hit":   self.is_max_target_hit(),
