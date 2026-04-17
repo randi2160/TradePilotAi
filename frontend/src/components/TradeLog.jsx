@@ -4,18 +4,20 @@ import { TrendingUp, TrendingDown, Download } from 'lucide-react'
 export default function TradeLog({ trades = [] }) {
   const [filter, setFilter] = useState('all')
 
+  const pnlOf = t => parseFloat(t.pnl ?? 0)
+
   const filtered = trades.filter(t => {
-    if (filter === 'wins')   return t.pnl > 0
-    if (filter === 'losses') return t.pnl < 0
+    if (filter === 'wins')   return pnlOf(t) > 0
+    if (filter === 'losses') return pnlOf(t) < 0
     return true
   })
 
-  const totalPnl   = trades.reduce((s, t) => s + t.pnl, 0)
-  const wins       = trades.filter(t => t.pnl > 0).length
-  const losses     = trades.filter(t => t.pnl < 0).length
+  const totalPnl   = trades.reduce((s, t) => s + pnlOf(t), 0)
+  const wins       = trades.filter(t => pnlOf(t) > 0).length
+  const losses     = trades.filter(t => pnlOf(t) < 0).length
   const winRate    = trades.length ? ((wins / trades.length) * 100).toFixed(1) : 0
-  const avgWin     = wins   ? (trades.filter(t=>t.pnl>0).reduce((s,t)=>s+t.pnl,0)/wins).toFixed(2) : 0
-  const avgLoss    = losses ? (trades.filter(t=>t.pnl<0).reduce((s,t)=>s+t.pnl,0)/losses).toFixed(2) : 0
+  const avgWin     = wins   ? (trades.filter(t=>pnlOf(t)>0).reduce((s,t)=>s+pnlOf(t),0)/wins).toFixed(2) : 0
+  const avgLoss    = losses ? (trades.filter(t=>pnlOf(t)<0).reduce((s,t)=>s+pnlOf(t),0)/losses).toFixed(2) : 0
 
   function exportCSV() {
     const cols = ['id','symbol','side','qty','entry_price','exit_price','pnl','pnl_pct','timestamp']
@@ -75,14 +77,14 @@ export default function TradeLog({ trades = [] }) {
             <div
               key={t.id}
               className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${
-                t.pnl >= 0
+                pnlOf(t) >= 0
                   ? 'bg-green-900/10 border-green-900/40'
                   : 'bg-red-900/10 border-red-900/40'
               }`}
             >
               {/* Icon */}
-              <div className={`rounded-lg p-1.5 ${t.pnl>=0?'bg-green-900/50':'bg-red-900/50'}`}>
-                {t.pnl >= 0
+              <div className={`rounded-lg p-1.5 ${pnlOf(t)>=0?'bg-green-900/50':'bg-red-900/50'}`}>
+                {pnlOf(t) >= 0
                   ? <TrendingUp  size={14} className="text-green-400" />
                   : <TrendingDown size={14} className="text-red-400"  />
                 }
@@ -116,11 +118,11 @@ export default function TradeLog({ trades = [] }) {
 
               {/* P&L */}
               <div className="text-right min-w-[70px]">
-                <p className={`font-bold text-sm ${t.pnl>=0?'text-green-400':'text-red-400'}`}>
-                  {t.pnl>=0?'+':''}${t.pnl.toFixed(2)}
+                <p className={`font-bold text-sm ${pnlOf(t)>=0?'text-green-400':'text-red-400'}`}>
+                  {pnlOf(t)>=0?'+':''}${pnlOf(t).toFixed(2)}
                 </p>
-                <p className={`text-xs ${t.pnl_pct>=0?'text-green-500':'text-red-500'}`}>
-                  {t.pnl_pct>=0?'+':''}{t.pnl_pct?.toFixed(2)}%
+                <p className={`text-xs ${(parseFloat(t.pnl_pct??0))>=0?'text-green-500':'text-red-500'}`}>
+                  {(parseFloat(t.pnl_pct??0))>=0?'+':''}{(parseFloat(t.pnl_pct??0)).toFixed(2)}%
                 </p>
               </div>
 
