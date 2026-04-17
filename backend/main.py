@@ -1239,10 +1239,60 @@ async def get_trades(user: User = Depends(get_current_user), db: Session = Depen
     except Exception as e:
         logger.debug(f"Alpaca order merge: {e}")
 
-    # Merge — DB records take priority, Alpaca fills fill the gaps
-    all_results = db_results + alpaca_results
-    all_results.sort(key=lambda x: str(x.get("opened_at", "")), reverse=True)
-    return all_results
+    # Also include current open positions from Alpaca
+    position_results = []
+    try:
+        broker = _resolve_broker(user)
+        if broker:
+            from datetime import date
+            today_str = str(date.today())
+            positions = broker.get_positions()
+            # Track which symbols already have an "open" trade in DB
+            db_open_syms = set(r["symbol"] for r in db_results if r.get("status") == "open")
+            for p in positions:
+                sym  = str(getattr(p, "symbol", ""))
+                if sym in db_open_syms:
+                    continue  # already shown from DB
+                qty  = float(getattr(p, "qty", 0) or 0)
+                side = "BUY" if qty > 0 else "SELL"
+                qty  = abs(qty)
+                entry = float(getattr(p, "avg_entry_price", 0) or 0)
+                mkt   = float(getattr(p, "current_price", 0) or 0)
+                upnl  = float(getattr(p, "unrealized_pl", 0) or 0)
+                upnl_pct = float(getattr(p, "unrealized_plpc", 0) or 0) * 100
+                mv    = float(getattr(p, "market_value", 0) or 0)
+                cost  = float(getattr(p, "cost_basis", 0) or 0)
+                position_results.append({
+                    "id":            f"pos_{sym}",
+                    "symbol":        sym.replace("/USD", "").replace("USD", "") if "USD" in sym else sym,
+                    "side":          side,
+                    "qty":           qty,
+                    "entry_price":   entry,
+                    "exit_price":    None,
+                    "pnl":           round(upnl, 2),
+                    "pnl_pct":       round(upnl_pct, 2),
+                    "position_value": round(mv, 2),
+                    "cost_basis":    round(cost, 2),
+                    "current_price": mkt,
+                    "status":        "open",
+                    "opened_at":     None,
+                    "trade_date":    today_str,
+                    "source":        "position",
+                })
+    except Exception as e:
+        logger.debug(f"Position merge: {e}")
+
+    # Merge — open positions first, then DB records, then Alpaca fills
+    all_results = position_results + db_results + alpaca_results
+    all_results.sort(key=lambda x: (
+        0 if x.get("status") == "open" else 1,  # open positions first
+        str(x.get("opened_at", "") or "")
+    ), reverse=False)
+    # Re-sort: open first, then by time descending
+    open_trades  = [r for r in all_results if r.get("status") == "open"]
+    closed_trades = [r for r in all_results if r.get("status") != "open"]
+    closed_trades.sort(key=lambda x: str(x.get("opened_at", "")), reverse=True)
+    return open_trades + closed_trades
 
 @app.get("/api/signals",        tags=["Data"])
 async def get_signals(user: User = Depends(get_current_user)):

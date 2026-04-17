@@ -60,12 +60,15 @@ export default function ActivityLog() {
     a.click()
   }
 
-  const todayStr = new Date().toISOString().slice(0, 10)
+  // Use local date (not UTC) so it matches the backend's trade_date
+  const now = new Date()
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`
   const todayTrades = trades.filter(t => {
-    // Use trade_date (YYYY-MM-DD) if available, fall back to opened_at
+    // Always show open positions (they're current by definition)
+    if (t.status === 'open') return true
     if (t.trade_date) return t.trade_date === todayStr
     const opened = t.opened_at ?? ''
-    return opened.startsWith(todayStr)
+    return opened.slice(0, 10) === todayStr
   })
 
   const s   = report?.summary ?? {}
@@ -155,19 +158,25 @@ export default function ActivityLog() {
                       </span>
                     )}
                     {isOpen && (
-                      <span className="text-brand-500 font-bold ml-auto">In Progress</span>
+                      <span className={`font-black text-lg ml-auto ${pnl>=0?'text-green-400':'text-red-400'}`}>
+                        {pnl>=0?'+':''}${pnl.toFixed(2)}
+                        <span className="text-xs font-normal text-gray-500 ml-1">unrealized</span>
+                      </span>
                     )}
                   </div>
 
                   {/* Details */}
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs text-gray-400">
                     <span>Entry: <strong className="text-white">${parseFloat(t.entry_price??0).toFixed(2)}</strong></span>
+                    {t.current_price && <span>Now: <strong className="text-brand-400">${parseFloat(t.current_price).toFixed(2)}</strong></span>}
                     {t.exit_price && <span>Exit: <strong className="text-white">${parseFloat(t.exit_price).toFixed(2)}</strong></span>}
                     {t.stop_loss  && <span>Stop: <strong className="text-red-300">${parseFloat(t.stop_loss).toFixed(2)}</strong></span>}
                     {t.take_profit && <span>Target: <strong className="text-green-300">${parseFloat(t.take_profit).toFixed(2)}</strong></span>}
-                    <span>Risk: <strong className="text-white">${parseFloat(t.risk_dollars??0).toFixed(2)}</strong></span>
-                    <span>Conf: <strong className="text-white">{((t.confidence??0)*100).toFixed(0)}%</strong></span>
-                    <span>Time: <strong className="text-white">{t.opened_at?.slice(11,19)}</strong></span>
+                    {t.position_value && isOpen && <span>Value: <strong className="text-white">${parseFloat(t.position_value).toFixed(2)}</strong></span>}
+                    {t.cost_basis && isOpen && <span>Cost: <strong className="text-white">${parseFloat(t.cost_basis).toFixed(2)}</strong></span>}
+                    {!isOpen && <span>Risk: <strong className="text-white">${parseFloat(t.risk_dollars??0).toFixed(2)}</strong></span>}
+                    {t.confidence > 0 && <span>Conf: <strong className="text-white">{((t.confidence??0)*100).toFixed(0)}%</strong></span>}
+                    {t.opened_at && <span>Time: <strong className="text-white">{t.opened_at?.slice(11,19)}</strong></span>}
                     {t.trade_date && <span>Date: <strong className="text-white">{t.trade_date}</strong></span>}
                   </div>
                 </div>
