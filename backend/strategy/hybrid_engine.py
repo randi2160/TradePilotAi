@@ -27,6 +27,7 @@ from typing     import Optional
 import pytz
 
 from strategy.crypto_engine import CryptoEngine, EngineState as CryptoState
+from strategy.bounce_engine import BounceTradeEngine
 
 logger = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
@@ -44,6 +45,7 @@ class HybridEngine:
         crypto_alloc_pct: float = 0.30,
         user_id: int = None,
         ensemble = None,  # EnsembleModel — shared ML layer for crypto+stocks
+        crypto_strategy: str = "scalp",  # "scalp" (default) or "bounce"
     ):
         self.broker        = broker
         self.user_id       = user_id  # per-user trade ownership
@@ -53,6 +55,7 @@ class HybridEngine:
         self.mode          = mode
         self.crypto_alloc  = crypto_alloc_pct
         self.ensemble      = ensemble  # passed to crypto engine for ML scoring
+        self.crypto_strategy = crypto_strategy  # "scalp" or "bounce"
 
         self.crypto_engine: Optional[CryptoEngine] = None
         self._running      = False
@@ -192,32 +195,50 @@ class HybridEngine:
             self.ai_split_log = self.ai_split_log[-50:]
         return decision
 
-    def init_crypto_engine(self, account: dict, split: dict) -> CryptoEngine:
-        """Create/update crypto engine with fresh account state."""
+    def init_crypto_engine(self, account: dict, split: dict):
+        """Create/update crypto engine with fresh account state.
+        Returns CryptoEngine (scalp) or BounceTradeEngine based on crypto_strategy."""
         targets = self._get_targets()
-        # Use configured capital from settings, NOT Alpaca's full paper equity
         configured_capital = self.settings.get_capital() if hasattr(self.settings, 'get_capital') else 5000
+        strategy = self.crypto_strategy
         logger.info(
-            f"init_crypto_engine | capital=${configured_capital} crypto_pct={split['crypto_pct']:.0%} "
+            f"init_crypto_engine | strategy={strategy} capital=${configured_capital} "
+            f"crypto_pct={split['crypto_pct']:.0%} "
             f"budget=${configured_capital * split['crypto_pct']:.2f} "
             f"ensemble={'✓' if self.ensemble else '✗'} "
             f"targets=min${targets['min']}/desired${targets['desired']}/stretch${targets['stretch']}"
         )
-        engine  = CryptoEngine(
-            broker            = self.broker,
-            target_min        = targets["min"],
-            target_desired    = targets["desired"],
-            target_stretch    = targets["stretch"],
-            max_daily_loss    = targets["loss"],
-            capital           = configured_capital,
-            crypto_alloc      = split["crypto_pct"],
-            min_scalp_profit  = 5,
-            compound_mode     = True,
-            min_probability   = 0.55,
-            max_positions     = 2,
-            user_id           = self.user_id,
-            ensemble          = self.ensemble,
-        )
+
+        if strategy == "bounce":
+            engine = BounceTradeEngine(
+                broker         = self.broker,
+                target_min     = targets["min"],
+                target_desired = targets["desired"],
+                target_stretch = targets["stretch"],
+                max_daily_loss = targets["loss"],
+                capital        = configured_capital,
+                crypto_alloc   = split["crypto_pct"],
+                max_positions  = 2,
+                user_id        = self.user_id,
+            )
+            logger.info("🔄 Bounce engine initialized")
+        else:
+            engine = CryptoEngine(
+                broker            = self.broker,
+                target_min        = targets["min"],
+                target_desired    = targets["desired"],
+                target_stretch    = targets["stretch"],
+                max_daily_loss    = targets["loss"],
+                capital           = configured_capital,
+                crypto_alloc      = split["crypto_pct"],
+                min_scalp_profit  = 5,
+                compound_mode     = True,
+                min_probability   = 0.55,
+                max_positions     = 2,
+                user_id           = self.user_id,
+                ensemble          = self.ensemble,
+            )
+
         # Apply user-configured milestones
         try:
             milestones = self.settings.get_profit_milestones()

@@ -38,6 +38,7 @@ export default function Settings() {
   const [msg,     setMsg]     = useState('')
   // Engine settings
   const [engineMode,    setEngineMode]    = useState('stocks_only')
+  const [cryptoStrategy, setCryptoStrategy] = useState('scalp')
   const [cryptoAlloc,          setCryptoAlloc]          = useState(30)
   const [afterHoursCryptoAlloc, setAfterHoursCryptoAlloc] = useState(80)
   const [stopHour,      setStopHour]      = useState(15)
@@ -56,6 +57,7 @@ export default function Settings() {
       setMaxLoss(s.max_daily_loss)
       setWl(s.watchlist ?? [])
       setEngineMode(s.engine_mode   || 'stocks_only')
+      setCryptoStrategy(s.crypto_strategy || 'scalp')
       setCryptoAlloc(Math.round((s.crypto_alloc_pct || 0.30) * 100))
       setAfterHoursCryptoAlloc(Math.round((s.after_hours_crypto_alloc_pct || 0.80) * 100))
       setStopHour(s.stop_new_trades_hour   ?? 15)
@@ -242,6 +244,36 @@ export default function Settings() {
           </div>
         </div>
 
+        {/* Crypto Strategy toggle (visible for crypto_only or hybrid) */}
+        {(engineMode === 'crypto_only' || engineMode === 'hybrid') && (
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-gray-400">Crypto Strategy</label>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: 'scalp', label: '⚡ Scalp', desc: 'Momentum-based fast scalps' },
+                { id: 'bounce', label: '🔄 Bounce', desc: 'Mean-reversion bounce trades' },
+              ].map(s => (
+                <button key={s.id}
+                  onClick={() => setCryptoStrategy(s.id)}
+                  className={`p-3 rounded-xl border text-left transition-all ${
+                    cryptoStrategy === s.id
+                      ? 'border-brand-500 bg-brand-500/10 text-white'
+                      : 'border-dark-600 bg-dark-700 text-gray-400 hover:border-dark-500'
+                  }`}>
+                  <div className="font-bold text-sm">{s.label}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{s.desc}</div>
+                </button>
+              ))}
+            </div>
+            {cryptoStrategy === 'bounce' && (
+              <p className="text-xs text-purple-400 bg-purple-900/20 border border-purple-800/40 rounded-lg p-2">
+                Bounce mode uses statistical analysis + AI to find mean-reversion setups.
+                Positions scale with confidence (65% min). Longer holds (~30 min max).
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Crypto allocation slider (only for hybrid) */}
         {engineMode === 'hybrid' && (
           <div className="space-y-3">
@@ -353,6 +385,7 @@ export default function Settings() {
               engine_mode:                  engineMode,
               crypto_alloc_pct:             cryptoAlloc / 100,
               after_hours_crypto_alloc_pct: afterHoursCryptoAlloc / 100,
+              crypto_strategy:              cryptoStrategy,
             })
             flash('✅ Engine settings saved!')
           } catch(e) {

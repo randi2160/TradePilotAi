@@ -752,6 +752,7 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
 
         # Step 2: Build HybridEngine
         t2 = _t.time()
+        _crypto_strategy = settings.all().get("crypto_strategy", "scalp")
         _hybrid_engine = HybridEngine(
             broker           = broker,
             settings         = settings,
@@ -761,6 +762,7 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
             crypto_alloc_pct = body.crypto_alloc,
             user_id          = user.id,
             ensemble         = getattr(user_bot, "ensemble", None),
+            crypto_strategy  = _crypto_strategy,
         )
         _crypto_running = True
         logger.info(f"║  [2] HybridEngine built ({_t.time()-t2:.2f}s) | "
@@ -1807,6 +1809,7 @@ class EngineSettingsBody(BaseModel):
     engine_mode:               str   = "stocks_only"
     crypto_alloc_pct:          float = 0.30
     after_hours_crypto_alloc_pct: float = 0.80   # 50%–100% after hours
+    crypto_strategy:           str   = "scalp"   # "scalp" or "bounce"
 
 @app.put("/api/settings/engine", tags=["Settings"])
 async def update_engine_settings(
@@ -1826,6 +1829,9 @@ async def update_engine_settings(
     if not (0.50 <= body.after_hours_crypto_alloc_pct <= 1.0):
         raise HTTPException(400, "after_hours_crypto_alloc_pct must be 0.50–1.0")
 
+    if body.crypto_strategy not in ("scalp", "bounce"):
+        raise HTTPException(400, "crypto_strategy must be scalp | bounce")
+
     settings.set_engine_settings(
         body.stop_new_trades_hour,
         body.stop_new_trades_minute,
@@ -1833,12 +1839,18 @@ async def update_engine_settings(
         body.engine_mode,
         body.crypto_alloc_pct,
         body.after_hours_crypto_alloc_pct,
+        body.crypto_strategy,
     )
 
     # Update live hybrid engine if running
     global _hybrid_engine
     if _hybrid_engine:
         _hybrid_engine.crypto_alloc            = body.crypto_alloc_pct
+        # If strategy changed, reset crypto engine so it picks up the new one
+        if _hybrid_engine.crypto_strategy != body.crypto_strategy:
+            logger.info(f"Crypto strategy changed: {_hybrid_engine.crypto_strategy} → {body.crypto_strategy}")
+            _hybrid_engine.crypto_strategy = body.crypto_strategy
+            _hybrid_engine.crypto_engine   = None  # will reinit on next cycle
         _hybrid_engine.after_hours_crypto_alloc = body.after_hours_crypto_alloc_pct
         logger.info(f"Live engine updated: market={body.crypto_alloc_pct:.0%} after-hours={body.after_hours_crypto_alloc_pct:.0%}")
 

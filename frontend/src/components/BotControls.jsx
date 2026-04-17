@@ -84,6 +84,16 @@ function CryptoEnginePanel({ settings }) {
     <div className={'border rounded-xl p-4 space-y-3 ' + borderClass}>
       <div className="flex items-center gap-2">
         <span className="text-sm font-bold text-white">₿ Crypto Engine</span>
+        {settings?.crypto_strategy === 'bounce' && (
+          <span className="text-xs px-2 py-0.5 rounded-full font-bold border text-purple-400 bg-purple-900/20 border-purple-800/40">
+            🔄 Bounce
+          </span>
+        )}
+        {settings?.crypto_strategy !== 'bounce' && (
+          <span className="text-xs px-2 py-0.5 rounded-full font-bold border text-blue-400 bg-blue-900/20 border-blue-800/40">
+            ⚡ Scalp
+          </span>
+        )}
         <span className={'text-xs px-2 py-0.5 rounded-full font-bold border ' + (
           running
             ? 'text-green-400 bg-green-900/20 border-green-800/40'

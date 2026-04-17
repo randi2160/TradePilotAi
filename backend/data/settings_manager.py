@@ -145,18 +145,21 @@ class SettingsManager:
             "engine_mode":                self._data.get("engine_mode",            "stocks_only"),
             "crypto_alloc_pct":           self._data.get("crypto_alloc_pct",       0.30),
             "after_hours_crypto_alloc_pct": self._data.get("after_hours_crypto_alloc_pct", 0.80),
+            "crypto_strategy":            self._data.get("crypto_strategy", "scalp"),
             "updated_at":                 self._data.get("updated_at", ""),
         }
 
     def set_engine_settings(self, stop_hour: int, stop_minute: int, max_positions: int,
                              engine_mode: str, crypto_alloc: float,
-                             after_hours_crypto_alloc: float = 0.80):
+                             after_hours_crypto_alloc: float = 0.80,
+                             crypto_strategy: str = "scalp"):
         self._data["stop_new_trades_hour"]        = stop_hour
         self._data["stop_new_trades_minute"]      = stop_minute
         self._data["max_open_positions"]          = max_positions
         self._data["engine_mode"]                 = engine_mode
         self._data["crypto_alloc_pct"]            = round(crypto_alloc, 2)
         self._data["after_hours_crypto_alloc_pct"] = round(min(1.0, max(0.50, after_hours_crypto_alloc)), 2)
+        self._data["crypto_strategy"]             = crypto_strategy if crypto_strategy in ("scalp", "bounce") else "scalp"
         self._save()
 
     def get_after_hours_crypto_alloc(self) -> float:
