@@ -115,6 +115,7 @@ except Exception as e:
 from data.ai_advisor      import AIAdvisor
 from data.dynamic_watchlist import DynamicWatchlistBuilder
 from data.market_scanner  import MarketScanner
+from strategy.bounce_analyzer import BounceAnalyzer
 from data.news_scanner    import NewsScanner
 from data.settings_manager import SettingsManager
 from database.database    import get_db, init_db, check_connection
@@ -196,9 +197,10 @@ def get_user_bot_if_exists(user_id: int) -> Optional[BotLoop]:
     """
     return _bot_registry.get(user_id)
 
-news_scanner = NewsScanner()
-mkt_scanner  = MarketScanner()
-ai_advisor   = AIAdvisor()
+news_scanner    = NewsScanner()
+mkt_scanner     = MarketScanner()
+ai_advisor      = AIAdvisor()
+bounce_analyzer = BounceAnalyzer()
 alert_svc    = AlertService()
 goal_engine  = GoalEngine()
 reporter     = DailyReporter()
@@ -888,6 +890,52 @@ async def run_crypto_cycle(user: User = Depends(get_current_user)):
         raise HTTPException(400, "Set engine mode first via /api/bot/engine-mode")
     result = await _hybrid_engine.run_cycle()
     return result
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bounce Analyzer — observation-only crypto pattern analysis
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/crypto/bounce-analysis", tags=["Crypto Bounce"])
+async def get_bounce_analysis(use_llm: bool = True, user: User = Depends(get_current_user)):
+    """Run bounce/mean-reversion analysis on all tradeable crypto.
+    Returns statistical analysis + LLM recommendations. Does NOT execute trades."""
+    broker = _resolve_broker(user)
+    if not broker:
+        raise HTTPException(400, "Connect your Alpaca broker first")
+
+    try:
+        from strategy.crypto_engine import CRYPTO_UNIVERSE
+        result = await bounce_analyzer.analyze_all(broker, CRYPTO_UNIVERSE, use_llm=use_llm)
+        return {
+            "coins":     result,
+            "count":     len(result),
+            "mode":      "observation_only",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "note":      "Analysis only — no trades executed. Review recommendations before enabling bounce mode.",
+        }
+    except Exception as e:
+        logger.error(f"Bounce analysis error: {e}")
+        raise HTTPException(500, str(e))
+
+@app.get("/api/crypto/bounce-analysis/cached", tags=["Crypto Bounce"])
+async def get_cached_bounce(user: User = Depends(get_current_user)):
+    """Return last bounce analysis without re-running (fast)."""
+    cached = bounce_analyzer.get_last_analysis()
+    if not cached:
+        return {"coins": {}, "count": 0, "note": "No analysis cached yet. Run /api/crypto/bounce-analysis first."}
+    return {"coins": cached, "count": len(cached), "mode": "observation_only"}
+
+@app.get("/api/crypto/bounce-analysis/{ticker}", tags=["Crypto Bounce"])
+async def get_bounce_single(ticker: str, user: User = Depends(get_current_user)):
+    """Run bounce analysis on a single crypto ticker."""
+    broker = _resolve_broker(user)
+    if not broker:
+        raise HTTPException(400, "Connect your Alpaca broker first")
+    result = await bounce_analyzer.analyze_all(broker, [ticker.upper()], use_llm=True)
+    if not result:
+        raise HTTPException(404, f"No data for {ticker}")
+    return {"ticker": ticker.upper(), **list(result.values())[0]}
+
 
 @app.get("/api/status",      tags=["Bot"])
 async def get_status(user: User = Depends(get_current_user)):

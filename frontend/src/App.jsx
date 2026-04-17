@@ -38,6 +38,7 @@ import BillingTab         from './components/BillingTab'
 import AlertBell, { AIRefreshBadge } from './components/AlertBell'
 import DailyAdvisor, { DailyPicksMini } from './components/DailyAdvisor'
 import AlpacaAccountPanel from './components/AlpacaAccountPanel'
+import CryptoBounceAnalysis from './components/CryptoBounceAnalysis'
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
@@ -54,6 +55,7 @@ const TABS = [
   { id: 'intel',       label: '🔬', full: 'Intelligence'  },
   { id: 'performance', label: '🏆', full: 'Performance'   },
   { id: 'bounce',      label: '📉', full: 'Peak Bounce'   },
+  { id: 'crypto-bounce', label: '🔄', full: 'Crypto Bounce' },
   { id: 'dual',        label: '⚡', full: 'Dual Engine'   },
   { id: 'chart',       label: '📈', full: 'Charts'        },
   { id: 'scanner',     label: '🔍', full: 'Scanner'       },
@@ -313,6 +315,7 @@ function TradingApp() {
         {tab === 'intel'       && <MarketIntelligence/>}
         {tab === 'performance' && <Performance/>}
         {tab === 'bounce'      && <PeakBounce           capital={capital}/>}
+        {tab === 'crypto-bounce' && <CryptoBounceAnalysis />}
         {tab === 'dual'        && <DualEngineDashboard  capital={capital}/>}
         {tab === 'chart'       && <ChartView            signals={signals}/>}
         {tab === 'scanner'     && <MarketScanner        onAddToWatchlist={handleAddToWatchlist}/>}
