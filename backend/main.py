@@ -24,7 +24,7 @@ if not _db_url or "yourpassword" in _db_url or _db_url == "postgresql://autotrad
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
 import uvicorn
