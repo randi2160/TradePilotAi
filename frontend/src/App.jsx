@@ -262,7 +262,7 @@ function TradingApp() {
       {/* Tabs */}
       <nav className="bg-dark-800 border-b border-dark-600 overflow-x-auto flex-shrink-0">
         <div className="flex min-w-max px-2">
-          {TABS.map(t => {
+          {TABS.filter(t => t.id !== 'admin' || user.is_admin).map(t => {
             let badge = null
             if (t.id === 'trades'  && trades.length > 0)  badge = trades.length
             if (t.id === 'signals' && signals.filter(s => s.signal !== 'HOLD').length > 0) badge = signals.filter(s => s.signal !== 'HOLD').length
@@ -305,7 +305,7 @@ function TradingApp() {
         {tab === 'social'      && <SocialFeed           currentUserId={user?.id}/>}
         {tab === 'copy'        && <CopyTrading/>}
         {tab === 'ipo'         && <IPOIntelligence/>}
-        {tab === 'admin'       && <AdminPanel/>}
+        {tab === 'admin'       && user.is_admin && <AdminPanel/>}
         {tab === 'safety'      && <SafetyControls botStatus={data?.bot_status ?? 'stopped'} onStatusChange={() => {}}/>}
         {tab === 'portfolio'   && <PortfolioChart       capital={capital}/>}
         {tab === 'goals'       && <GoalSetting          capital={capital}/>}
@@ -324,7 +324,7 @@ function TradingApp() {
         {tab === 'trades'      && <TradeLog             trades={trades}/>}
         {tab === 'manual'      && <ManualTrade          capital={capital} onTrade={() => getTrades().then(setTrades)}/>}
         {tab === 'mode'        && <AutoManualToggle     data={data}/>}
-        {tab === 'bot'         && <BotControls          data={data}/>}
+        {tab === 'bot'         && <BotControls          data={data} user={user}/>}
         {tab === 'broker'      && <BrokerManager/>}
         {tab === 'settings'    && <Settings/>}
         {tab === 'profile'     && <UserProfile/>}

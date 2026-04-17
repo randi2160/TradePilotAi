@@ -452,6 +452,7 @@ export default function Dashboard({ data }) {
   const [todayStats,   setTodayStats]   = useState(null)
   const [engineStatus, setEngineStatus] = useState(null)
   const [dayPnl,       setDayPnl]       = useState(null)   // from /api/dashboard/today
+  const [restPositions, setRestPositions] = useState([])    // fallback positions from REST
 
   useEffect(() => {
     const load = () => {
@@ -459,6 +460,11 @@ export default function Dashboard({ data }) {
       api.get('/analytics/today').then(r => setTodayStats(r.data)).catch(() => {})
       api.get('/bot/engine-status').then(r => setEngineStatus(r.data)).catch(() => {})
       getDashboardToday().then(setDayPnl).catch(() => {})
+      // Fetch open positions via REST as reliable fallback
+      api.get('/trades').then(r => {
+        const open = (r.data || []).filter(t => t.status === 'open')
+        setRestPositions(open)
+      }).catch(() => {})
     }
     load()
     const iv = setInterval(load, 5000)
@@ -480,7 +486,8 @@ export default function Dashboard({ data }) {
   const capital   = parseFloat(data.capital       ?? data.settings?.capital ?? 5000)
   const winRate   = parseFloat(data.win_rate      ?? todayStats?.win_rate   ?? 0)
   const trades    = data.trade_count ?? todayStats?.trade_count ?? 0
-  const positions = data.positions ?? []
+  const wsPositions = data.positions ?? []
+  const positions   = wsPositions.length > 0 ? wsPositions : restPositions
   const signals   = data.signals   ?? []
   const dualOn    = dualSummary?.initialized
   const combinedPnl = dualOn ? parseFloat(dualSummary.total_pnl ?? pnl) : pnl

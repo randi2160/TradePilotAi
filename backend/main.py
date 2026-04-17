@@ -666,6 +666,8 @@ async def start_bot(body: BotStartBody, user: User = Depends(get_current_user)):
     return 400 NO_BROKER so the UI can prompt them to connect before
     retrying.
 
+    Live mode requires a paid subscription (or admin privileges).
+
     Wrapped in timing + broad exception logging so pm2 logs tell us
     exactly when the endpoint entered, when bot.start() returned, and
     what (if anything) blew up. Without this, a hung startup looks
@@ -674,6 +676,13 @@ async def start_bot(body: BotStartBody, user: User = Depends(get_current_user)):
     import time as _time
     t_enter = _time.time()
     logger.info(f"/api/bot/start ▶ uid={user.id} email={user.email} mode={body.mode} trading_mode={body.trading_mode}")
+
+    # ── Live mode gate: paid subscription or admin only ──────────────
+    if body.mode == "live" and not user.is_admin:
+        tier = (user.subscription_tier or "free").lower()
+        if tier == "free":
+            raise HTTPException(403, "Live trading requires a paid subscription. Upgrade your plan to enable live mode.")
+
     bot = get_user_bot(user)
     try:
         await bot.start(mode=body.mode, trading_mode=body.trading_mode, user=user)

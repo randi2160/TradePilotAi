@@ -74,6 +74,8 @@ def _user_dict(user: User) -> dict:
         "trading_mode":     user.trading_mode,
         "alpaca_mode":      user.alpaca_mode,
         "has_alpaca_keys":  bool(user.alpaca_key),
+        "is_admin":         bool(user.is_admin),
+        "subscription_tier": user.subscription_tier or "free",
         "created_at":       str(user.created_at),
         "last_login":       str(user.last_login) if user.last_login else None,
     }

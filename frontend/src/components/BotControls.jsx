@@ -187,7 +187,7 @@ function CryptoEnginePanel({ settings }) {
 }
 
 // ── Main BotControls ──────────────────────────────────────────────────────────
-export default function BotControls({ data }) {
+export default function BotControls({ data, user }) {
   const [loading,  setLoading]  = useState('')
   const [mode,     setMode]     = useState('paper')
   const [msg,      setMsg]      = useState('')
@@ -248,31 +248,43 @@ export default function BotControls({ data }) {
       </div>
 
       {/* Mode selector */}
-      {!running && (
-        <div className="grid grid-cols-2 gap-3">
-          {[
-            { id: 'paper', icon: '🛡️', title: 'Paper',  desc: 'Fake money, real market. Safe for testing.' },
-            { id: 'live',  icon: '⚡', title: 'Live',   desc: 'Real money. Only use after paper testing.' },
-          ].map(m => (
-            <button
-              key={m.id}
-              onClick={() => setMode(m.id)}
-              className={'p-4 rounded-xl border text-left transition-all ' + (
-                mode === m.id
-                  ? m.id === 'live'
-                    ? 'border-red-600 bg-red-900/20'
-                    : 'border-brand-500 bg-brand-500/10'
-                  : 'border-dark-600 bg-dark-800 hover:border-dark-500'
-              )}
-            >
-              <div className="flex items-center gap-2 font-bold text-white mb-1">
-                <span>{m.icon}</span> {m.title}
-              </div>
-              <p className="text-xs text-gray-400">{m.desc}</p>
-            </button>
-          ))}
-        </div>
-      )}
+      {!running && (() => {
+        const tier    = user?.subscription_tier || 'free'
+        const isAdmin = user?.is_admin
+        const canLive = isAdmin || (tier !== 'free')
+        return (
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { id: 'paper', icon: '🛡️', title: 'Paper',  desc: 'Fake money, real market. Safe for testing.' },
+              { id: 'live',  icon: '⚡', title: 'Live',   desc: canLive ? 'Real money. Only use after paper testing.' : 'Upgrade to a paid plan to enable live trading.' },
+            ].map(m => {
+              const locked = m.id === 'live' && !canLive
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => !locked && setMode(m.id)}
+                  disabled={locked}
+                  className={'p-4 rounded-xl border text-left transition-all ' + (
+                    locked
+                      ? 'border-dark-600 bg-dark-800 opacity-50 cursor-not-allowed'
+                      : mode === m.id
+                        ? m.id === 'live'
+                          ? 'border-red-600 bg-red-900/20'
+                          : 'border-brand-500 bg-brand-500/10'
+                        : 'border-dark-600 bg-dark-800 hover:border-dark-500'
+                  )}
+                >
+                  <div className="flex items-center gap-2 font-bold text-white mb-1">
+                    <span>{m.icon}</span> {m.title}
+                    {locked && <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-900/40 text-yellow-400 font-medium ml-auto">PRO</span>}
+                  </div>
+                  <p className="text-xs text-gray-400">{m.desc}</p>
+                </button>
+              )
+            })}
+          </div>
+        )
+      })()}
 
       {/* Start / Stop */}
       {!running ? (
