@@ -519,19 +519,24 @@ async def run_daily_scan(
     stock_candidates = []
     try:
         import main as _app_module
-        _bot = getattr(_app_module, "get_user_bot_if_exists", lambda uid: None)(user.id)
-        broker = _bot.broker if _bot else None
-        if broker:
-            from data.market_scanner import MarketScanner
-            scanner = MarketScanner(broker)
-            gainers = scanner.get_top_gainers(limit=10)
-            actives = scanner.get_most_active(limit=10)
+        # Use the app-level scanner singleton (already has cached scan data)
+        _scanner = getattr(_app_module, "mkt_scanner", None)
+        if _scanner:
+            gainers = _scanner.get_top_gainers(10)
+            actives = _scanner.get_most_active(10)
             seen = set()
             for sym in gainers + actives:
                 s = sym if isinstance(sym, str) else sym.get("symbol", "")
                 if s and s not in seen:
                     stock_candidates.append(s)
                     seen.add(s)
+        if not stock_candidates:
+            # Trigger a fresh scan if no cached data
+            scan_result = await _scanner.scan() if _scanner else {}
+            for sym in scan_result.get("gainers", [])[:10] + scan_result.get("most_active", [])[:10]:
+                s = sym if isinstance(sym, str) else sym.get("symbol", "")
+                if s and s not in set(stock_candidates):
+                    stock_candidates.append(s)
     except Exception as e:
         logger.warning(f"Stock scanner error: {e}")
 
@@ -539,12 +544,15 @@ async def run_daily_scan(
     if not stock_candidates:
         stock_candidates = ["SPY","QQQ","AAPL","TSLA","NVDA","AMD","META","AMZN","COIN","MSTR"]
 
-    # ── Step 2: Dynamic crypto scan via yfinance (all 25 coins) ──────────────
-    CRYPTO_UNIVERSE = [
-        "BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH",
-        "AVAX","XRP","ADA","DOT","ATOM","ALGO","NEAR","SAND",
-        "MANA","CRV","SUSHI","BAT","ZEC","DASH","ETC","SHIB","FIL",
-    ]
+    # ── Step 2: Dynamic crypto scan — use Alpaca-discovered pairs + extras ────
+    try:
+        from strategy.crypto_engine import ALPACA_TRADEABLE as _live_crypto
+        CRYPTO_UNIVERSE = sorted(_live_crypto)
+    except Exception:
+        CRYPTO_UNIVERSE = [
+            "BTC","ETH","SOL","DOGE","LINK","AAVE","LTC","BCH",
+            "AVAX","XRP","ADA","DOT","ATOM","ALGO","NEAR","SHIB",
+        ]
 
     def _score_crypto_momentum(ticker: str) -> dict:
         try:

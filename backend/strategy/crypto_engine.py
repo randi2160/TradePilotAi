@@ -22,21 +22,59 @@ from data.indicators import add_all_indicators
 
 logger = logging.getLogger(__name__)
 
-# Alpaca paper trading ONLY supports these crypto symbols.
-# If Alpaca adds more pairs, add them here and they will automatically be
-# included in scans.
+# Known Alpaca-tradeable crypto (fallback if dynamic fetch fails).
+# This list is expanded at startup by _discover_alpaca_crypto().
 ALPACA_TRADEABLE = {
     "BTC", "ETH", "LTC", "BCH", "DOGE",
     "LINK", "AAVE", "SOL", "XRP", "SHIB",
 }
 
-# Scan universe = only coins we can actually trade.
-# Previously we scanned 25 coins but 15 of them (ADA, DOT, ATOM, ALGO, NEAR,
-# SAND, MANA, CRV, SUSHI, BAT, ZEC, DASH, ETC, AVAX, FIL) couldn't be executed
-# on Alpaca paper — they just burned scan cycles and Binance API calls.
-# Broader momentum discovery for watchlist suggestions lives elsewhere
-# (/api/ai/watchlist-suggest); the trading engine focuses on what it can act on.
-CRYPTO_UNIVERSE = sorted(ALPACA_TRADEABLE)
+# Extended universe — coins that Alpaca has supported historically.
+# _discover_alpaca_crypto() probes these + any new ones Alpaca adds.
+_EXTENDED_CANDIDATES = [
+    "BTC", "ETH", "LTC", "BCH", "DOGE", "LINK", "AAVE", "SOL", "XRP", "SHIB",
+    "UNI", "SUSHI", "CRV", "MKR", "COMP", "GRT", "BAT", "YFI", "SNX",
+    "AVAX", "MATIC", "DOT", "ATOM", "ALGO", "NEAR", "FIL", "ETC",
+    "ADA", "MANA", "SAND", "APE", "LDO", "OP", "ARB", "PEPE", "WIF",
+    "FET", "RNDR", "INJ", "TIA", "SEI", "SUI", "JUP", "BONK",
+]
+
+def _discover_alpaca_crypto() -> set:
+    """Probe Alpaca to find all currently tradeable crypto pairs.
+    Runs once at import time — adds ~2s to startup but gives us the full list."""
+    global ALPACA_TRADEABLE
+    try:
+        import requests as _req
+        import config
+        headers = {
+            "APCA-API-KEY-ID": config.ALPACA_API_KEY,
+            "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
+        }
+        # Fetch snapshots for all candidates — Alpaca returns data only for valid pairs
+        symbols = ",".join(f"{t}/USD" for t in _EXTENDED_CANDIDATES)
+        resp = _req.get(
+            "https://data.alpaca.markets/v1beta3/crypto/us/snapshots",
+            params={"symbols": symbols},
+            headers=headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            found = set()
+            for pair in resp.json().get("snapshots", {}).keys():
+                ticker = pair.replace("/USD", "").replace("USD", "")
+                if ticker:
+                    found.add(ticker)
+            if len(found) >= 5:  # sanity check — don't replace with near-empty set
+                ALPACA_TRADEABLE = found
+                logger.info(f"Discovered {len(found)} Alpaca crypto pairs: {sorted(found)}")
+                return found
+    except Exception as e:
+        logger.warning(f"Crypto discovery failed (using {len(ALPACA_TRADEABLE)} known): {e}")
+    return ALPACA_TRADEABLE
+
+# Run discovery at import time
+ALPACA_TRADEABLE = _discover_alpaca_crypto()
+CRYPTO_UNIVERSE  = sorted(ALPACA_TRADEABLE)
 
 # Binance scanner was removed: AWS US IPs get HTTP 451 geo-blocked.
 # All crypto data now flows through Alpaca v1beta3 (broker.get_crypto_bars),

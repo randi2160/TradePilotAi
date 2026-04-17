@@ -519,21 +519,33 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
                 if user_bot is not None:
                     summary = user_bot.get_live_summary()
                 else:
+                    # No stock bot started — but user may still have positions
+                    # from the hybrid/crypto engine or manual trades on Alpaca.
+                    _ws_broker = _resolve_broker(user)
+                    _ws_positions = []
+                    _ws_account   = {}
+                    if _ws_broker:
+                        try:
+                            _ws_positions = _ws_broker.get_positions()
+                            _ws_account   = _ws_broker.get_account()
+                        except Exception:
+                            pass
+                    _ws_upnl = sum(float(p.get("unrealized_pl", 0)) for p in _ws_positions)
                     summary = {
                         "bot_status":       "stopped",
                         "mode":             "paper",
                         "trading_mode":     "auto",
                         "dynamic_watchlist": False,
-                        "account":          {},
-                        "positions":        [],
+                        "account":          _ws_account,
+                        "positions":        _ws_positions,
                         "signals":          [],
                         "pending_trades":   [],
                         "unusual_volume":   [],
                         "active_watchlist": settings.get_watchlist(),
                         "wl_scores":        {},
                         "realized_pnl":     0,
-                        "unrealized_pnl":   0,
-                        "total_pnl":        0,
+                        "unrealized_pnl":   round(_ws_upnl, 2),
+                        "total_pnl":        round(_ws_upnl, 2),
                         "trade_count":      0,
                     }
                 summary["settings"] = settings.all()
@@ -1118,38 +1130,37 @@ async def get_trades(user: User = Depends(get_current_user), db: Session = Depen
     try:
         # SECURITY: per-user creds only — never bot_loop.broker.
         broker = _resolve_broker(user)
-        if broker:
+        if broker and hasattr(broker, "trading"):
             from datetime import date
             today_str = str(date.today())
             try:
-                raw_orders = broker.get_open_orders() + (
-                    getattr(broker, "_filled_today", [])
+                from alpaca.trading.requests import GetOrdersRequest
+                from alpaca.trading.enums   import QueryOrderStatus
+                req = GetOrdersRequest(
+                    status=QueryOrderStatus.ALL, limit=100,
+                    after=f"{today_str}T00:00:00Z",
                 )
-                # Get filled orders via direct API call
-                try:
-                    from alpaca.trading.requests import GetOrdersRequest
-                    from alpaca.trading.enums   import QueryOrderStatus
-                    req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=50,
-                                          after=f"{today_str}T00:00:00Z")
-                    raw_orders = broker.trading.get_orders(filter=req)
-                except Exception:
-                    raw_orders = []
+                raw_orders = broker.trading.get_orders(filter=req)
             except Exception:
                 raw_orders = []
-            db_order_ids = set()  # don't duplicate DB records
+
+            db_symbols_today = set(r["symbol"] + r.get("opened_at", "")[:16]
+                                   for r in db_results if r.get("trade_date") == today_str)
             for o in raw_orders:
                 try:
                     if str(getattr(o, "status", "")) != "filled":
                         continue
                     sym = str(getattr(o, "symbol", ""))
                     oid = str(getattr(o, "id", ""))
-                    if oid in db_order_ids:
-                        continue
                     filled_qty = float(getattr(o, "filled_qty", 0) or 0)
                     fill_price = float(getattr(o, "filled_avg_price", 0) or 0)
                     side       = str(getattr(o, "side", "buy")).upper()
                     filled_at  = str(getattr(o, "filled_at", "") or "")
                     pv         = round(filled_qty * fill_price, 2)
+                    # Skip if DB already has this trade (rough dedup by symbol+time)
+                    dedup_key = sym + filled_at[:16]
+                    if dedup_key in db_symbols_today:
+                        continue
                     alpaca_results.append({
                         "id":            f"alpaca_{oid[:8]}",
                         "symbol":        sym,
