@@ -47,6 +47,12 @@ class BotLoop:
 
         self._pending_trades: list = []
         self._unusual_volume: list = []
+        # Cooldown: symbol → datetime when it becomes eligible again
+        # After a trail exit / harvest close, block re-entry for 30 min
+        self._cooldowns: dict = {}
+        # Peak unrealized tracking for drawdown guard
+        self._peak_unrealized: float = 0.0
+        self._unrealized_pause_until: float = 0.0  # timestamp
 
     # ── Control ───────────────────────────────────────────────────────────────
 
@@ -145,6 +151,27 @@ class BotLoop:
             f"+{_time.time()-t0:.2f}s realized=${self.tracker.realized_pnl:.2f}"
         )
         self.tracker.record_session_start()
+
+        # ── Auto-enable profit protection so user never trades unprotected ──
+        try:
+            from database.database  import SessionLocal
+            from services           import protection_service
+            with SessionLocal() as db:
+                ps = protection_service.get_or_create(db, self.user_id or 1)
+                # Ensure protection + ladder are always ON at start
+                if not ps.enabled:
+                    ps.enabled = True
+                if not ps.ladder_enabled:
+                    ps.ladder_enabled = True
+                if not ps.scaleout_enabled:
+                    ps.scaleout_enabled = True
+                db.commit()
+                logger.info(
+                    f"bot.start[{uid_tag}] Protection auto-enabled: "
+                    f"floor=${float(ps.floor_value):.2f}, ladder=ON, scaleout=ON"
+                )
+        except Exception as e:
+            logger.warning(f"bot.start[{uid_tag}] protection init: {e}")
 
         self._task = asyncio.create_task(self._loop())
         logger.info(
@@ -273,7 +300,7 @@ class BotLoop:
                 try:
                     import time as _t
                     now_ts = _t.time()
-                    if now_ts - last_harvest_ts > 60:   # at most once/minute
+                    if now_ts - last_harvest_ts > 15:   # every 15s for fast protection
                         last_harvest_ts = now_ts
                         await self._run_protection_tick(positions)
                 except Exception as e:
@@ -294,9 +321,19 @@ class BotLoop:
                 else:
                     active_wl = self._settings.get_watchlist()
 
+                # Check if we're in a drawdown pause
+                import time as _t2
+                if _t2.time() < self._unrealized_pause_until:
+                    logger.info("⏸️ Drawdown pause active — skipping new entries")
+                    await asyncio.sleep(config.SCAN_INTERVAL)
+                    continue
+
                 for symbol in active_wl:
                     if self.status != "running":
                         break
+                    # Skip symbols in cooldown (recently exited by protection)
+                    if self._is_cooled_down(symbol):
+                        continue
                     try:
                         sig = await self.engine.scan_symbol(symbol)
 
@@ -367,6 +404,21 @@ class BotLoop:
                 "queued_at": datetime.now(ET).isoformat(),
             })
 
+    def _is_cooled_down(self, symbol: str) -> bool:
+        """Check if a symbol is in cooldown (recently exited by ladder/harvest)."""
+        until = self._cooldowns.get(symbol)
+        if until and datetime.now(ET) < until:
+            return True  # still cooling down
+        if until:
+            del self._cooldowns[symbol]  # expired, clean up
+        return False
+
+    def _set_cooldown(self, symbol: str, minutes: int = 30):
+        """Block re-entry on a symbol for N minutes after protective exit."""
+        from datetime import timedelta
+        self._cooldowns[symbol] = datetime.now(ET) + timedelta(minutes=minutes)
+        logger.info(f"🧊 Cooldown set: {symbol} blocked for {minutes}min")
+
     def _add_unusual_volume(self, symbol: str, sig: dict):
         if symbol not in [a["symbol"] for a in self._unusual_volume]:
             self._unusual_volume.append({
@@ -401,6 +453,9 @@ class BotLoop:
                         logger.info(
                             f"🪜 Ladder {act['action']}: {act['symbol']} — {act['reason']}"
                         )
+                        # Set cooldown on exited symbols — wait for fresh momentum
+                        if act["action"] in ("trail_exit", "scale_out"):
+                            self._set_cooldown(act["symbol"], minutes=30)
                 except Exception as e:
                     logger.warning(f"ladder_service.run_ladder_tick: {e}")
 
@@ -413,8 +468,43 @@ class BotLoop:
                     if harvested:
                         for h in harvested:
                             logger.info(f"🌾 Harvested {h['symbol']}: {h['reason']}")
+                            self._set_cooldown(h["symbol"], minutes=30)
                 except Exception as e:
                     logger.warning(f"harvest_positions: {e}")
+
+                # 1c) Unrealized drawdown guard — if total floating P&L drops
+                #     more than 40% from its peak, close the worst loser and
+                #     pause new entries for 5 minutes.
+                try:
+                    import time as _t3
+                    total_upnl = sum(
+                        float(p.get("unrealized_pnl", 0) or 0) for p in positions
+                    )
+                    if total_upnl > self._peak_unrealized:
+                        self._peak_unrealized = total_upnl
+                    # Only guard when we've had meaningful gains (peak > $20)
+                    if self._peak_unrealized > 20.0 and total_upnl > 0:
+                        drawdown_pct = 1.0 - (total_upnl / self._peak_unrealized) if self._peak_unrealized > 0 else 0
+                        if drawdown_pct >= 0.40:
+                            logger.warning(
+                                f"📉 Unrealized drawdown guard: peak ${self._peak_unrealized:.2f} "
+                                f"→ now ${total_upnl:.2f} ({drawdown_pct*100:.0f}% drop). "
+                                f"Closing worst loser + pausing 5min."
+                            )
+                            # Find and close the worst-performing position
+                            worst = min(positions, key=lambda p: float(p.get("unrealized_pnl", 0) or 0))
+                            worst_sym = worst.get("symbol", "")
+                            if worst_sym and float(worst.get("unrealized_pnl", 0) or 0) < 0:
+                                try:
+                                    self.broker.close_position(worst_sym)
+                                    logger.info(f"📉 Closed worst loser: {worst_sym}")
+                                    self._set_cooldown(worst_sym, minutes=30)
+                                except Exception as e:
+                                    logger.warning(f"drawdown close {worst_sym}: {e}")
+                            self._unrealized_pause_until = _t3.time() + 300  # 5 min pause
+                            self._peak_unrealized = total_upnl  # reset peak to current
+                except Exception as e:
+                    logger.warning(f"unrealized drawdown guard: {e}")
 
                 # 2) Snapshot + ratchet runs on the daily_pnl_service flow
                 #    (called from main.py snapshot endpoints and finalize_day).

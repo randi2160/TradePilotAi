@@ -118,11 +118,11 @@ class CryptoPosition:
         Update trailing stop as price moves up.
         Returns True if stop was raised (for logging).
 
-        Tiers:
-          - Price up 0.3% from entry  → stop to break-even (entry)
-          - Price up 0.5%             → trail at 60% of gain
-          - Price up 1.0%             → trail at 70% of gain
-          - Price up 2.0%+            → trail at 80% of gain (lock most profit)
+        Tiers (2026-04-18 hardened — protect gains aggressively):
+          - Price up 0.2% from entry  → stop to break-even (entry)
+          - Price up 0.5%             → trail at 70% of gain
+          - Price up 1.0%             → trail at 85% of gain
+          - Price up 2.0%+            → trail at 92% of gain (lock almost all profit)
         """
         if current_price <= self.peak_price:
             return False  # price not at new high, no update needed
@@ -131,19 +131,19 @@ class CryptoPosition:
         gain_pct = (current_price - self.entry) / self.entry * 100
 
         if gain_pct >= 2.0:
-            # Up 2%+ — lock in 80% of gains
-            new_stop = self.entry + (current_price - self.entry) * 0.80
-            trail_label = "80% trail (2%+ gain)"
+            # Up 2%+ — lock in 92% of gains (give back max ~0.16%)
+            new_stop = self.entry + (current_price - self.entry) * 0.92
+            trail_label = "92% trail (2%+ gain)"
         elif gain_pct >= 1.0:
-            # Up 1% — lock in 70% of gains
-            new_stop = self.entry + (current_price - self.entry) * 0.70
-            trail_label = "70% trail (1%+ gain)"
+            # Up 1% — lock in 85% of gains
+            new_stop = self.entry + (current_price - self.entry) * 0.85
+            trail_label = "85% trail (1%+ gain)"
         elif gain_pct >= 0.5:
-            # Up 0.5% — lock in 60% of gains
-            new_stop = self.entry + (current_price - self.entry) * 0.60
-            trail_label = "60% trail (0.5%+ gain)"
-        elif gain_pct >= 0.3:
-            # Up 0.3% — at least break even
+            # Up 0.5% — lock in 70% of gains
+            new_stop = self.entry + (current_price - self.entry) * 0.70
+            trail_label = "70% trail (0.5%+ gain)"
+        elif gain_pct >= 0.2:
+            # Up 0.2% — at least break even (earlier trigger)
             new_stop = self.entry * 1.001  # tiny buffer above entry
             trail_label = "break-even stop"
         else:

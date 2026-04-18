@@ -10,20 +10,30 @@ import {
 } from '../services/api'
 
 const TIER_COLORS = {
-  tier5_runner:    'text-emerald-400',
-  tier4_breakout:  'text-green-400',
-  tier3_strong:    'text-lime-400',
-  tier2_building:  'text-yellow-400',
-  tier1_breakeven: 'text-orange-400',
-  tier0_inactive:  'text-gray-500',
+  tier9_moon:       'text-purple-400',
+  tier8_rocket:     'text-fuchsia-400',
+  tier7_runner:     'text-emerald-400',
+  tier6_breakout:   'text-green-400',
+  tier5_strong:     'text-lime-400',
+  tier4_building:   'text-teal-400',
+  tier3_early:      'text-yellow-400',
+  tier2_starter:    'text-amber-400',
+  tier1_breakeven:  'text-orange-400',
+  tier0_early_be:   'text-orange-300',
+  tier_inactive:    'text-gray-500',
 }
 const TIER_LABELS = {
-  tier5_runner:    'Runner',
-  tier4_breakout:  'Breakout',
-  tier3_strong:    'Strong',
-  tier2_building:  'Building',
-  tier1_breakeven: 'Breakeven',
-  tier0_inactive:  'Inactive',
+  tier9_moon:       'Moon',
+  tier8_rocket:     'Rocket',
+  tier7_runner:     'Runner',
+  tier6_breakout:   'Breakout',
+  tier5_strong:     'Strong',
+  tier4_building:   'Building',
+  tier3_early:      'Early',
+  tier2_starter:    'Starter',
+  tier1_breakeven:  'Breakeven',
+  tier0_early_be:   'Early BE',
+  tier_inactive:    'Inactive',
 }
 
 function money(v, digits = 2) {

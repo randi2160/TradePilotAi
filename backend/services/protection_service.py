@@ -44,6 +44,28 @@ def get_or_create(db: Session, user_id: int) -> ProtectionSettings:
           .one_or_none()
     )
     if row:
+        # One-time migration: tighten legacy defaults for existing users
+        # (lock_pct was 0.70, milestone was $100 — now 0.90 and $50)
+        migrated = False
+        if float(row.lock_pct or 0) < 0.85 and float(row.lock_pct or 0) == 0.70:
+            row.lock_pct = 0.90
+            migrated = True
+        if float(row.milestone_size or 0) >= 100.0:
+            row.milestone_size = 50.0
+            migrated = True
+        if float(row.time_decay_hours or 0) >= 4.0:
+            row.time_decay_hours = 3.0
+            migrated = True
+        if not row.ladder_enabled:
+            row.ladder_enabled = True
+            migrated = True
+        if not row.scaleout_enabled:
+            row.scaleout_enabled = True
+            migrated = True
+        if migrated:
+            db.commit()
+            db.refresh(row)
+            logger.info(f"⬆️ Protection settings migrated for user {user_id} — tighter defaults applied")
         return row
 
     # First time — capture current capital as the initial floor
@@ -55,11 +77,18 @@ def get_or_create(db: Session, user_id: int) -> ProtectionSettings:
         enabled         = True,
         floor_value     = base,
         initial_capital = base,
-        milestone_size  = 100.0,
-        lock_pct        = 0.70,
+        milestone_size  = 50.0,       # ratchet every $50 (more frequent protection)
+        lock_pct        = 0.90,       # lock 90% of gains (strict protection)
         harvest_position_pct  = 0.08,
         harvest_portfolio_cap = 500.0,
         breach_action   = "halt_close",
+        # Ladder — always on by default
+        ladder_enabled       = True,
+        scaleout_enabled     = True,
+        scaleout_milestones  = [0.03, 0.05, 0.08, 0.12],  # scale out earlier + more often
+        scaleout_fraction    = 0.25,
+        concentration_pct    = 0.30,
+        time_decay_hours     = 3.0,   # tighten sooner (was 4h)
     )
     db.add(row)
     db.commit()

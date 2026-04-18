@@ -220,8 +220,8 @@ class ProtectionSettings(Base):
     # Account floor config
     floor_value           = Column(Float, default=5000.0)  # current locked floor (monotonic)
     initial_capital       = Column(Float, default=5000.0)  # snapshot of base at init — "never below this"
-    milestone_size        = Column(Float, default=100.0)   # raise floor every $N of compound gain
-    lock_pct              = Column(Float, default=0.70)    # % of each milestone permanently locked
+    milestone_size        = Column(Float, default=50.0)    # raise floor every $50 of compound gain (tighter)
+    lock_pct              = Column(Float, default=0.90)    # % of each milestone permanently locked (strict)
 
     # Harvest config
     harvest_position_pct  = Column(Float, default=0.08)    # force-close a position at this unrealized gain
@@ -232,10 +232,10 @@ class ProtectionSettings(Base):
     # just toggle whether the ladder runs at all, and the scale-out fractions.
     ladder_enabled        = Column(Boolean, default=True)
     scaleout_enabled      = Column(Boolean, default=True)
-    scaleout_milestones   = Column(JSON,    default=lambda: [0.05, 0.10, 0.15])  # fire at +5/+10/+15 %
+    scaleout_milestones   = Column(JSON,    default=lambda: [0.03, 0.05, 0.08, 0.12])  # scale out earlier
     scaleout_fraction     = Column(Float,   default=0.25)   # sell 25% of original qty at each milestone
     concentration_pct     = Column(Float,   default=0.30)   # bump tier when a position > 30% of equity
-    time_decay_hours      = Column(Float,   default=4.0)    # bump tier if no new peak for N hours
+    time_decay_hours      = Column(Float,   default=3.0)    # bump tier if no new peak for 3h (tighter)
 
     # Breach behavior
     breach_action         = Column(String(20), default="halt_close")  # halt_close|halt_only|alert_only

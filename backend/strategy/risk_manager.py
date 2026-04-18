@@ -39,9 +39,10 @@ class DynamicRiskManager:
         if current_pnl <= -self.daily_loss_lim:
             return self._block("Daily loss limit reached", price, atr)
 
-        # ── Kill-switch: max target already hit ──────────────────────────────
-        if current_pnl >= target_max:
-            return self._block("Daily max-target already hit", price, atr)
+        # ── Past max target: keep trading with reduced size ───────────────
+        # Don't block — Randy wants the bot to continue while protecting gains.
+        # We shrink position size by 50% once max target is exceeded.
+        past_max_multiplier = 0.50 if current_pnl >= target_max else 1.0
 
         # ── Too many open positions ───────────────────────────────────────────
         if open_positions >= config.MAX_OPEN_POSITIONS:
@@ -55,7 +56,7 @@ class DynamicRiskManager:
         prot_mult = max(0.4, 1.0 - progress * 0.6)  # shrinks toward 0.4 as we approach target
 
         base_risk_pct = 0.010                 # 1 % base
-        risk_pct      = base_risk_pct * conf_mult * prot_mult
+        risk_pct      = base_risk_pct * conf_mult * prot_mult * past_max_multiplier
         risk_dollars  = self.capital * risk_pct
 
         # ── ATR-based stop distance ───────────────────────────────────────────

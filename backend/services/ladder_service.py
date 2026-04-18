@@ -68,16 +68,22 @@ logger = logging.getLogger(__name__)
 #
 LADDER_TIERS = [
     # (peak_gain_floor, trail_fraction_of_peak, label)
-    (0.25, 0.955, "tier8_moon"),        # peak >=25%  → lock 95.5% (max give-back ~1.1%)
-    (0.20, 0.945, "tier7_rocket"),      # peak >=20%  → lock 94.5% (max give-back ~1.1%)
-    (0.15, 0.93,  "tier6_runner"),      # peak >=15%  → lock 93%   (max give-back ~1.1%)
-    (0.10, 0.88,  "tier5_breakout"),    # peak >=10%  → lock 88%   (max give-back ~1.2%)
-    (0.07, 0.82,  "tier4_strong"),      # peak  >=7%  → lock 82%   (max give-back ~1.3%)
-    (0.05, 0.75,  "tier3_building"),    # peak  >=5%  → lock 75%   (max give-back ~1.3%)
-    (0.03, 0.60,  "tier2_early"),       # peak  >=3%  → lock 60%   (max give-back ~1.2%)
-    (0.015, 0.35, "tier1_starter"),     # peak >=1.5% → lock 35%   (~+0.5% protected)
-    (0.008, 0.00, "tier0_breakeven"),   # peak >=0.8% → trail at entry (breakeven)
-    (0.00, None,  "tier_inactive"),     # peak  <0.8% → no trail, initial stop only
+    #
+    # 2026-04-18 HARDENED tiers — Randy lost money because gains weren't
+    # locked tightly enough. New philosophy: protect aggressively at EVERY
+    # level. Max give-back capped at ~0.5-0.8% of entry for all tiers.
+    #
+    (0.25, 0.97,  "tier9_moon"),        # peak >=25%  → lock 97%   (give-back ~0.75%)
+    (0.20, 0.96,  "tier8_rocket"),      # peak >=20%  → lock 96%   (give-back ~0.8%)
+    (0.15, 0.95,  "tier7_runner"),      # peak >=15%  → lock 95%   (give-back ~0.75%)
+    (0.10, 0.92,  "tier6_breakout"),    # peak >=10%  → lock 92%   (give-back ~0.8%)
+    (0.07, 0.88,  "tier5_strong"),      # peak  >=7%  → lock 88%   (give-back ~0.84%)
+    (0.05, 0.82,  "tier4_building"),    # peak  >=5%  → lock 82%   (give-back ~0.9%)
+    (0.03, 0.70,  "tier3_early"),       # peak  >=3%  → lock 70%   (give-back ~0.9%)
+    (0.015, 0.50, "tier2_starter"),     # peak >=1.5% → lock 50%   (give-back ~0.75%)
+    (0.008, 0.00, "tier1_breakeven"),   # peak >=0.8% → trail at entry (breakeven)
+    (0.005, 0.00, "tier0_early_be"),    # peak >=0.5% → breakeven (lock entry early)
+    (0.00, None,  "tier_inactive"),     # peak  <0.5% → no trail, initial stop only
 ]
 
 
