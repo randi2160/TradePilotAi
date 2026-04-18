@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { AuthProvider, useAuth, api } from './hooks/useAuth'
 import { useWebSocket }               from './hooks/useWebSocket'
 import { getTrades, addSymbol, getDashboardToday } from './services/api'
+import { Search } from 'lucide-react'
 import LoginPage            from './components/LoginPage'
 import Dashboard            from './components/Dashboard'
 import ChartView            from './components/ChartView'
@@ -84,6 +85,30 @@ function TradingApp() {
   // Persistent daily P&L — survives backend restart because it reads from the
   // `daily_pnl` table rather than the bot's in-memory tracker.
   const [dayPnl,       setDayPnl]       = useState(null)
+  // Global search
+  const [searchQuery,  setSearchQuery]  = useState('')
+  const [searchOpen,   setSearchOpen]   = useState(false)
+  const searchRef = useRef(null)
+
+  function handleSearchSubmit(e) {
+    e.preventDefault()
+    const sym = searchQuery.trim().toUpperCase().replace('$', '')
+    if (!sym) return
+    // Open symbol page + auto-add to watchlist
+    addSymbol(sym).catch(() => {})
+    setActiveSymbol(sym)
+    setSearchQuery('')
+    setSearchOpen(false)
+  }
+
+  // Close search on click outside
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (searchRef.current && !searchRef.current.contains(e.target)) setSearchOpen(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
 
   useEffect(() => {
     const handler = (e) => setTab(e.detail)
@@ -194,6 +219,28 @@ function TradingApp() {
         <div className="hidden sm:block">
           <img src="/logo.png" alt="Morviq AI — AI That Trades. Wealth That Grows." className="h-10 w-auto object-contain"/>
         </div>
+
+        {/* Global symbol search */}
+        <div ref={searchRef} className="relative">
+          <form onSubmit={handleSearchSubmit} className="flex items-center">
+            <div className={`flex items-center bg-dark-700 border rounded-lg transition-all ${searchOpen ? 'border-brand-500 w-44 sm:w-56' : 'border-dark-600 w-9 sm:w-44'}`}>
+              <button type="button" onClick={() => { setSearchOpen(true); setTimeout(() => searchRef.current?.querySelector('input')?.focus(), 50) }}
+                className="flex-shrink-0 w-9 h-8 flex items-center justify-center text-gray-400 hover:text-brand-400">
+                <Search size={15}/>
+              </button>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))}
+                onFocus={() => setSearchOpen(true)}
+                placeholder="Ticker…"
+                maxLength={10}
+                className={`bg-transparent text-sm text-white placeholder-gray-500 outline-none pr-2 py-1 ${searchOpen ? 'w-full' : 'hidden sm:block w-full'}`}
+              />
+            </div>
+          </form>
+        </div>
+
         {/* Today settled (realized) — persists across restart via DailyPnL table */}
         <div title="Realized P&L — settled closed trades today"
           className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1 ${realizedToday >= 0 ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>

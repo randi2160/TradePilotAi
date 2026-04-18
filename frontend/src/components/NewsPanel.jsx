@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Search } from 'lucide-react'
 import { getMarketNews, getSymbolNews, addSymbol } from '../services/api'
 
 const SENTIMENT_COLORS = {
@@ -9,6 +10,19 @@ const SENTIMENT_COLORS = {
 
 function SymbolTag({ sym }) {
   const [added, setAdded] = useState(false)
+
+  async function handleClick(e) {
+    e.preventDefault()
+    e.stopPropagation()
+    // Auto-add to watchlist
+    try {
+      await addSymbol(sym)
+      setAdded(true)
+      setTimeout(() => setAdded(false), 3000)
+    } catch {}
+    // Open symbol popup/page
+    window.dispatchEvent(new CustomEvent('openSymbol', { detail: sym }))
+  }
 
   async function handleAdd(e) {
     e.preventDefault()
@@ -22,7 +36,13 @@ function SymbolTag({ sym }) {
 
   return (
     <div className="flex items-center gap-0.5 bg-dark-600 rounded overflow-hidden">
-      <span className="text-xs text-gray-300 px-1.5 py-0.5">${sym}</span>
+      <button
+        onClick={handleClick}
+        title={`View ${sym} details & add to watchlist`}
+        className="text-xs text-gray-300 px-1.5 py-0.5 hover:text-brand-400 hover:bg-dark-500 transition-colors cursor-pointer"
+      >
+        ${sym}
+      </button>
       <button
         onClick={handleAdd}
         title={added ? `${sym} added!` : `Add ${sym} to watchlist`}
@@ -94,6 +114,18 @@ export default function NewsPanel({ watchlist = [] }) {
   const [news,    setNews]    = useState([])
   const [symbol,  setSymbol]  = useState('market')
   const [loading, setLoading] = useState(false)
+  const [searchInput, setSearchInput] = useState('')
+
+  function handleNewsSearch(e) {
+    e.preventDefault()
+    const sym = searchInput.trim().toUpperCase().replace('$', '')
+    if (!sym) return
+    // Add to watchlist + open symbol page + filter news to that symbol
+    addSymbol(sym).catch(() => {})
+    window.dispatchEvent(new CustomEvent('openSymbol', { detail: sym }))
+    setSymbol(sym)
+    setSearchInput('')
+  }
 
   useEffect(() => { loadNews() }, [symbol])
   useEffect(() => {
@@ -142,10 +174,28 @@ export default function NewsPanel({ watchlist = [] }) {
             {sym}
           </button>
         ))}
+        {/* Ticker search — look up any symbol, auto-add to watchlist */}
+        <form onSubmit={handleNewsSearch} className="flex items-center gap-1 ml-auto">
+          <div className="flex items-center bg-dark-700 border border-dark-600 rounded-lg focus-within:border-brand-500">
+            <Search size={13} className="ml-2 text-gray-500"/>
+            <input
+              type="text"
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))}
+              placeholder="Look up ticker…"
+              maxLength={10}
+              className="bg-transparent text-xs text-white placeholder-gray-500 outline-none px-2 py-1.5 w-28 sm:w-36"
+            />
+          </div>
+          <button type="submit" disabled={!searchInput.trim()}
+            className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-brand-500 text-dark-900 hover:bg-brand-400 disabled:opacity-40 transition-colors">
+            Add
+          </button>
+        </form>
         <button
           onClick={loadNews}
           disabled={loading}
-          className="ml-auto px-3 py-1 rounded-lg text-xs bg-dark-700 text-gray-400 hover:bg-dark-600"
+          className="px-3 py-1 rounded-lg text-xs bg-dark-700 text-gray-400 hover:bg-dark-600"
         >
           {loading ? '⟳' : '↻'} Refresh
         </button>
