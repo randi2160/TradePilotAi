@@ -698,6 +698,56 @@ class CryptoEngine:
             "reason":     "sized",
         }
 
+    # ── Broker position sync ─────────────────────────────────────────────────
+
+    def _sync_broker_positions(self):
+        """Reconcile in-memory open_positions with Alpaca's actual positions.
+
+        On restart, self.open_positions is empty but Alpaca may still have
+        crypto positions from the previous session. Without this sync, the
+        duplicate-check (already_held) passes and we stack positions — e.g.
+        opening 3 AAVE positions when we should only have 1.
+
+        Called once at the start of the first cycle and every 50 cycles.
+        """
+        try:
+            broker_positions = self.broker.get_positions() or []
+            for p in broker_positions:
+                sym = (p.get("symbol") or "").upper()
+                # Skip non-crypto
+                if "/" not in sym and sym.replace("USD", "") not in ALPACA_TRADEABLE:
+                    continue
+                # Normalize: broker reports "AAVEUSD", we track "AAVE/USD"
+                if "/" not in sym and sym.endswith("USD"):
+                    normalized = sym[:-3] + "/USD"
+                else:
+                    normalized = sym
+                # Skip if already tracked
+                if normalized in self.open_positions:
+                    continue
+                qty   = abs(float(p.get("qty") or 0))
+                entry = float(p.get("avg_entry_price") or 0)
+                cur   = float(p.get("current_price") or entry)
+                if qty <= 0 or entry <= 0:
+                    continue
+                stop   = entry * 0.98
+                target = entry * 1.02
+                pos = CryptoPosition(
+                    symbol=normalized, side="BUY", qty=qty,
+                    entry=entry, stop=stop, target=target,
+                )
+                pos.peak_price = max(cur, entry)
+                pos.trail_stop = stop
+                self.open_positions[normalized] = pos
+                logger.info(
+                    f"🔄 Synced broker position: {normalized} qty={qty} "
+                    f"entry=${entry:.4f} current=${cur:.4f}"
+                )
+            if self.open_positions:
+                self.state = EngineState.POSITION_OPEN
+        except Exception as e:
+            logger.warning(f"_sync_broker_positions: {e}")
+
     # ── Main cycle ─────────────────────────────────────────────────────────────
 
     async def run_cycle(self) -> dict:
@@ -706,6 +756,10 @@ class CryptoEngine:
         Returns status dict with current state.
         """
         self.cycle_count += 1
+
+        # Sync with broker on first cycle and every 50 cycles
+        if self.cycle_count == 1 or self.cycle_count % 50 == 0:
+            self._sync_broker_positions()
 
         # Reset error state so we keep retrying
         if self.state == EngineState.ERROR:
