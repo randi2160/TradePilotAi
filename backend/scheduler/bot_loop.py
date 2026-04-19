@@ -53,6 +53,8 @@ class BotLoop:
         # Peak unrealized tracking for drawdown guard
         self._peak_unrealized: float = 0.0
         self._unrealized_pause_until: float = 0.0  # timestamp
+        # HARD breach flag — once set, NO trading until manually restarted
+        self._floor_breached: bool = False
 
     # ── Control ───────────────────────────────────────────────────────────────
 
@@ -293,6 +295,21 @@ class BotLoop:
                 unrealized = sum(p.get("unrealized_pnl", 0) for p in positions)
                 self.tracker.update_unrealized(unrealized)
 
+                # ── HARD BREACH CHECK — runs EVERY iteration, not rate-limited ──
+                # If floor was already breached, close everything and stop.
+                if self._floor_breached:
+                    logger.warning("🛑 Floor breach flag active — closing all + stopping")
+                    try:
+                        for p in positions:
+                            sym = p.get("symbol", "")
+                            if sym:
+                                self.broker.close_position(sym)
+                                logger.info(f"🛑 Breach close: {sym}")
+                    except Exception as e:
+                        logger.warning(f"breach close-all: {e}")
+                    self.status = "stopped"
+                    break
+
                 # ── Profit protection (account-level floor + harvest + breach) ──
                 # The snapshot ratchets the floor automatically; here we watch
                 # live equity for breaches and periodically harvest oversized
@@ -320,6 +337,10 @@ class BotLoop:
                     active_wl = list(dict.fromkeys(active_wl + user_syms))
                 else:
                     active_wl = self._settings.get_watchlist()
+
+                # Floor breach — do NOT scan for new trades
+                if self._floor_breached:
+                    break
 
                 # Check if we're in a drawdown pause
                 import time as _t2
@@ -521,13 +542,32 @@ class BotLoop:
                     breach = protection_service.check_breach(db, user_id, live_equity)
                     if breach.get("breached"):
                         logger.warning(
-                            f"⚠️ Floor breach: equity ${live_equity:.2f} < "
+                            f"🛑🛑🛑 FLOOR BREACH: equity ${live_equity:.2f} < "
                             f"floor ${breach.get('floor_value', 0):.2f} "
                             f"(shortfall ${breach.get('shortfall', 0):.2f}) — "
                             f"action={breach.get('action')}"
                         )
-                        protection_service.execute_breach_response(
-                            db, user_id, self.broker, bot_loop=self._stop_shim()
+                        # SET HARD FLAG IMMEDIATELY — stops all trading on next iteration
+                        self._floor_breached = True
+                        # Close all positions RIGHT NOW synchronously
+                        try:
+                            all_pos = self.broker.get_positions() or []
+                            for p in all_pos:
+                                sym = p.get("symbol", "")
+                                if sym:
+                                    try:
+                                        self.broker.close_position(sym)
+                                        logger.warning(f"🛑 Breach: closed {sym}")
+                                    except Exception as e:
+                                        logger.warning(f"🛑 Breach close {sym} failed: {e}")
+                        except Exception as e:
+                            logger.warning(f"🛑 Breach close-all failed: {e}")
+                        # Stop the bot
+                        self.status = "stopped"
+                        logger.warning(
+                            f"🛑 BOT STOPPED — floor breach. "
+                            f"Equity ${live_equity:.2f} < floor ${breach.get('floor_value', 0):.2f}. "
+                            f"All positions closed. Restart manually after review."
                         )
         except Exception as e:
             logger.warning(f"_run_protection_tick outer: {e}")
