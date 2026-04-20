@@ -192,9 +192,34 @@ export default function BotControls({ data, user }) {
   const [mode,     setMode]     = useState('paper')
   const [msg,      setMsg]      = useState('')
   const [settings, setSettings] = useState(null)
+  const [localStatus, setLocalStatus] = useState(null) // override WS status after start/stop
 
-  const status  = data?.bot_status ?? 'stopped'
+  const status  = localStatus ?? data?.bot_status ?? 'stopped'
   const running = status === 'running'
+
+  // Clear local override once WS catches up
+  useEffect(() => {
+    if (localStatus && data?.bot_status === localStatus) {
+      setLocalStatus(null)
+    }
+  }, [data?.bot_status, localStatus])
+
+  // Poll status after start to confirm backend state
+  useEffect(() => {
+    if (localStatus !== 'running') return
+    const iv = setInterval(() => {
+      api.get('/status').then(r => {
+        if (r.data?.bot_status === 'running') {
+          setLocalStatus(null) // WS should take over
+          clearInterval(iv)
+        } else if (r.data?.bot_status === 'stopped') {
+          setLocalStatus('stopped') // bot actually stopped
+          clearInterval(iv)
+        }
+      }).catch(() => {})
+    }, 3000)
+    return () => clearInterval(iv)
+  }, [localStatus])
 
   useEffect(() => {
     api.get('/settings').then(r => setSettings(r.data)).catch(() => {})
@@ -206,6 +231,9 @@ export default function BotControls({ data, user }) {
     try {
       await fn()
       setMsg('')
+      // Immediately set local status so UI reflects the action
+      if (label === 'start') setLocalStatus('running')
+      if (label === 'stop') setLocalStatus('stopped')
     } catch (e) {
       setMsg('Error: ' + (e.response?.data?.detail || e.message))
     } finally {
