@@ -512,6 +512,7 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
 
     await ws.accept()
     ws_clients.append(ws)
+    logger.info(f"WS[uid={user.id}] connected")
     try:
         while True:
             try:
@@ -584,7 +585,10 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
                         pass
 
                 await ws.send_json(summary)
-            except Exception:
+            except WebSocketDisconnect:
+                break
+            except Exception as _ws_err:
+                logger.warning(f"WS[uid={user.id}] send error: {_ws_err}")
                 break
             await asyncio.sleep(2)
     except WebSocketDisconnect:
