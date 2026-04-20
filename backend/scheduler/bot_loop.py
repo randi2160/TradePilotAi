@@ -288,7 +288,11 @@ class BotLoop:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def _loop(self):
-        await self._train_models()
+        try:
+            await self._train_models()
+        except Exception as e:
+            logger.error(f"_loop: initial training failed (non-fatal): {e}")
+        logger.info("_loop: entering main trading loop")
         last_train_day  = datetime.now(ET).date()
         last_wl_day     = None
         last_harvest_ts = 0.0   # unix timestamp of last harvest tick
@@ -304,6 +308,7 @@ class BotLoop:
                     last_train_day = now.date()
 
                 if not self.broker.is_market_open():
+                    logger.debug("Market closed — sleeping 60s (bot still running)")
                     await asyncio.sleep(60)
                     continue
 
@@ -417,6 +422,9 @@ class BotLoop:
             except Exception as e:
                 logger.error(f"Loop error: {e}")
                 await asyncio.sleep(10)
+
+        # If we get here, the loop exited — log it
+        logger.warning(f"_loop exited — status={self.status}, floor_breached={self._floor_breached}")
 
     # ── Dynamic watchlist — truly market-driven ───────────────────────────────
 
