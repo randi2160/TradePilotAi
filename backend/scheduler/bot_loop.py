@@ -82,18 +82,19 @@ class BotLoop:
             logger.info(f"bot.start[{uid_tag}] already running — no-op")
             return
         # Clear breach flag on manual restart — user acknowledges the breach
-        # Also reset the floor to current equity so it doesn't re-trigger instantly
-        if self._floor_breached:
-            logger.info(f"bot.start[{uid_tag}] clearing floor breach flag (manual restart)")
-            self._floor_breached = False
-            try:
-                from database.database import SessionLocal as _SL2
-                from services import protection_service
-                with _SL2() as _breach_db:
-                    _uid = self.user_id or (user.id if user else None)
-                    if _uid:
-                        settings = protection_service.get_or_create(_breach_db, _uid)
-                        # Reset floor to current equity so bot can trade
+        self._floor_breached = False
+        # ALWAYS check equity vs floor at start time — if equity is below
+        # the locked floor, reset the floor so the bot doesn't immediately
+        # stop itself. The user pressing Start = acknowledging the situation.
+        try:
+            from database.database import SessionLocal as _SL2
+            from services import protection_service
+            with _SL2() as _breach_db:
+                _uid = self.user_id or (user.id if user else None)
+                if _uid:
+                    settings = protection_service.get_or_create(_breach_db, _uid)
+                    if settings.enabled and float(settings.floor_value or 0) > 0:
+                        # Build broker to get live equity
                         _tmp_broker = AlpacaClient()
                         if user:
                             from broker.broker_routes import _load_creds
@@ -105,16 +106,22 @@ class BotLoop:
                                 )
                         _acct = _tmp_broker.get_account()
                         _eq = float(_acct.get("equity", 0))
-                        if _eq > 0 and _eq < float(settings.floor_value or 0):
-                            old_floor = float(settings.floor_value)
-                            settings.floor_value = _eq * 0.99  # Set floor 1% below current to give breathing room
-                            _breach_db.commit()
+                        _floor = float(settings.floor_value or 0)
+                        if _eq > 0 and _eq < _floor:
+                            # Equity is below floor — reset floor so bot can trade
+                            new_floor = _eq * 0.99  # 1% below current for breathing room
                             logger.warning(
-                                f"bot.start[{uid_tag}] floor reset: ${old_floor:.2f} → ${settings.floor_value:.2f} "
-                                f"(current equity ${_eq:.2f})"
+                                f"bot.start[{uid_tag}] equity ${_eq:.2f} < floor ${_floor:.2f} "
+                                f"— resetting floor to ${new_floor:.2f}"
                             )
-            except Exception as e:
-                logger.warning(f"bot.start[{uid_tag}] floor reset failed: {e}")
+                            settings.floor_value = new_floor
+                            _breach_db.commit()
+                        else:
+                            logger.info(
+                                f"bot.start[{uid_tag}] floor OK: equity ${_eq:.2f} >= floor ${_floor:.2f}"
+                            )
+        except Exception as e:
+            logger.warning(f"bot.start[{uid_tag}] floor check at start failed: {e}")
         # Refresh watchlist from settings before starting
         self.watchlist    = self._settings.get_watchlist()
         self.mode         = mode
