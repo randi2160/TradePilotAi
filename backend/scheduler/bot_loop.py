@@ -93,33 +93,31 @@ class BotLoop:
                 _uid = self.user_id or (user.id if user else None)
                 if _uid:
                     settings = protection_service.get_or_create(_breach_db, _uid)
-                    if settings.enabled and float(settings.floor_value or 0) > 0:
-                        # Build broker to get live equity
-                        _tmp_broker = AlpacaClient()
-                        if user:
-                            from broker.broker_routes import _load_creds
-                            _c = _load_creds(user)
-                            if _c:
-                                _tmp_broker = AlpacaClient(
-                                    api_key=_c["key"], secret_key=_c["secret"],
-                                    paper=_c.get("paper", True)
+                    if settings.enabled and float(settings.floor_value or 0) > 0 and user:
+                        # Build broker with user's creds to get live equity
+                        from broker.broker_routes import _load_creds
+                        _c = _load_creds(user)
+                        if _c and _c.get("api_key"):
+                            _tmp_broker = AlpacaClient(
+                                api_key=_c["api_key"],
+                                api_secret=_c.get("api_secret", ""),
+                                paper=_c.get("paper", True)
+                            )
+                            _acct = _tmp_broker.get_account()
+                            _eq = float(_acct.get("equity", 0))
+                            _floor = float(settings.floor_value or 0)
+                            if _eq > 0 and _eq < _floor:
+                                new_floor = _eq * 0.99
+                                logger.warning(
+                                    f"bot.start[{uid_tag}] equity ${_eq:.2f} < floor ${_floor:.2f} "
+                                    f"— resetting floor to ${new_floor:.2f}"
                                 )
-                        _acct = _tmp_broker.get_account()
-                        _eq = float(_acct.get("equity", 0))
-                        _floor = float(settings.floor_value or 0)
-                        if _eq > 0 and _eq < _floor:
-                            # Equity is below floor — reset floor so bot can trade
-                            new_floor = _eq * 0.99  # 1% below current for breathing room
-                            logger.warning(
-                                f"bot.start[{uid_tag}] equity ${_eq:.2f} < floor ${_floor:.2f} "
-                                f"— resetting floor to ${new_floor:.2f}"
-                            )
-                            settings.floor_value = new_floor
-                            _breach_db.commit()
-                        else:
-                            logger.info(
-                                f"bot.start[{uid_tag}] floor OK: equity ${_eq:.2f} >= floor ${_floor:.2f}"
-                            )
+                                settings.floor_value = new_floor
+                                _breach_db.commit()
+                            else:
+                                logger.info(
+                                    f"bot.start[{uid_tag}] floor OK: equity ${_eq:.2f} >= floor ${_floor:.2f}"
+                                )
         except Exception as e:
             logger.warning(f"bot.start[{uid_tag}] floor check at start failed: {e}")
         # Refresh watchlist from settings before starting
