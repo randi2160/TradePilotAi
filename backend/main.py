@@ -37,6 +37,15 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy.orm import Session
 
 from auth.auth       import get_current_user, decode_token
+import numpy as np
+
+def _np_safe(obj):
+    """Convert numpy types to native Python for JSON serialization."""
+    if isinstance(obj, (np.bool_, np.generic)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 from auth.routes     import router as auth_router
 from strategy.bounce_routes import router as bounce_router
 from strategy.dual_routes   import router as dual_router
@@ -584,7 +593,10 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
                     except Exception:
                         pass
 
-                await ws.send_json(summary)
+                # Convert numpy types to native Python so JSON serialization works
+                import json
+                safe_summary = json.loads(json.dumps(summary, default=_np_safe))
+                await ws.send_json(safe_summary)
             except WebSocketDisconnect:
                 break
             except Exception as _ws_err:
