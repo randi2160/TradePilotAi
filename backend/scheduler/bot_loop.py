@@ -81,6 +81,40 @@ class BotLoop:
         if self.status == "running":
             logger.info(f"bot.start[{uid_tag}] already running — no-op")
             return
+        # Clear breach flag on manual restart — user acknowledges the breach
+        # Also reset the floor to current equity so it doesn't re-trigger instantly
+        if self._floor_breached:
+            logger.info(f"bot.start[{uid_tag}] clearing floor breach flag (manual restart)")
+            self._floor_breached = False
+            try:
+                from database.database import SessionLocal as _SL2
+                from services import protection_service
+                with _SL2() as _breach_db:
+                    _uid = self.user_id or (user.id if user else None)
+                    if _uid:
+                        settings = protection_service.get_or_create(_breach_db, _uid)
+                        # Reset floor to current equity so bot can trade
+                        _tmp_broker = AlpacaClient()
+                        if user:
+                            from broker.broker_routes import _load_creds
+                            _c = _load_creds(user)
+                            if _c:
+                                _tmp_broker = AlpacaClient(
+                                    api_key=_c["key"], secret_key=_c["secret"],
+                                    paper=_c.get("paper", True)
+                                )
+                        _acct = _tmp_broker.get_account()
+                        _eq = float(_acct.get("equity", 0))
+                        if _eq > 0 and _eq < float(settings.floor_value or 0):
+                            old_floor = float(settings.floor_value)
+                            settings.floor_value = _eq * 0.99  # Set floor 1% below current to give breathing room
+                            _breach_db.commit()
+                            logger.warning(
+                                f"bot.start[{uid_tag}] floor reset: ${old_floor:.2f} → ${settings.floor_value:.2f} "
+                                f"(current equity ${_eq:.2f})"
+                            )
+            except Exception as e:
+                logger.warning(f"bot.start[{uid_tag}] floor reset failed: {e}")
         # Refresh watchlist from settings before starting
         self.watchlist    = self._settings.get_watchlist()
         self.mode         = mode
