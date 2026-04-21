@@ -1,45 +1,49 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { AuthProvider, useAuth, api } from './hooks/useAuth'
 import { useWebSocket }               from './hooks/useWebSocket'
 import { getTrades, addSymbol, getDashboardToday } from './services/api'
 import { Search } from 'lucide-react'
+// Eager — needed on first render
 import LoginPage            from './components/LoginPage'
 import Dashboard            from './components/Dashboard'
-import ChartView            from './components/ChartView'
-import BotControls          from './components/BotControls'
-import TradeLog             from './components/TradeLog'
-import Signals              from './components/Signals'
-import PortfolioChart       from './components/PortfolioChart'
-import NewsPanel            from './components/NewsPanel'
-import MarketScanner        from './components/MarketScanner'
-import Settings             from './components/Settings'
-import AIAdvisor            from './components/AIAdvisor'
-import AutoManualToggle     from './components/AutoManualToggle'
-import UserProfile          from './components/UserProfile'
-import ManualTrade          from './components/ManualTrade'
-import Performance          from './components/Performance'
-import PeakBounce           from './components/PeakBounce'
-import DualEngineDashboard  from './components/DualEngineDashboard'
-import GoalSetting          from './components/GoalSetting'
-import DailyReport          from './components/DailyReport'
-import PnLHistory           from './components/PnLHistory'
-import MarketIntelligence   from './components/MarketIntelligence'
 import LiveTicker           from './components/LiveTicker'
-import BrokerManager        from './components/BrokerManager'
-import ActivityLog          from './components/ActivityLog'
-import SocialFeed           from './components/SocialFeed'
-import CopyTrading          from './components/CopyTrading'
-import IPOIntelligence      from './components/IPOIntelligence'
-import AdminPanel          from './components/AdminPanel'
-import SafetyControls      from './components/SafetyControls'
-import ConsentFlow         from './components/ConsentFlow'
-import SymbolPage          from './components/SymbolPage'
-import StockBoard         from './components/StockBoard'
-import BillingTab         from './components/BillingTab'
 import AlertBell, { AIRefreshBadge } from './components/AlertBell'
-import DailyAdvisor, { DailyPicksMini } from './components/DailyAdvisor'
-import AlpacaAccountPanel from './components/AlpacaAccountPanel'
-import CryptoBounceAnalysis from './components/CryptoBounceAnalysis'
+// Lazy — loaded on tab click
+const ChartView            = lazy(() => import('./components/ChartView'))
+const BotControls          = lazy(() => import('./components/BotControls'))
+const TradeLog             = lazy(() => import('./components/TradeLog'))
+const Signals              = lazy(() => import('./components/Signals'))
+const PortfolioChart       = lazy(() => import('./components/PortfolioChart'))
+const NewsPanel            = lazy(() => import('./components/NewsPanel'))
+const MarketScanner        = lazy(() => import('./components/MarketScanner'))
+const Settings             = lazy(() => import('./components/Settings'))
+const AIAdvisor            = lazy(() => import('./components/AIAdvisor'))
+const AutoManualToggle     = lazy(() => import('./components/AutoManualToggle'))
+const UserProfile          = lazy(() => import('./components/UserProfile'))
+const ManualTrade          = lazy(() => import('./components/ManualTrade'))
+const Performance          = lazy(() => import('./components/Performance'))
+const PeakBounce           = lazy(() => import('./components/PeakBounce'))
+const DualEngineDashboard  = lazy(() => import('./components/DualEngineDashboard'))
+const GoalSetting          = lazy(() => import('./components/GoalSetting'))
+const DailyReport          = lazy(() => import('./components/DailyReport'))
+const PnLHistory           = lazy(() => import('./components/PnLHistory'))
+const MarketIntelligence   = lazy(() => import('./components/MarketIntelligence'))
+const BrokerManager        = lazy(() => import('./components/BrokerManager'))
+const ActivityLog          = lazy(() => import('./components/ActivityLog'))
+const SocialFeed           = lazy(() => import('./components/SocialFeed'))
+const CopyTrading          = lazy(() => import('./components/CopyTrading'))
+const IPOIntelligence      = lazy(() => import('./components/IPOIntelligence'))
+const AdminPanel           = lazy(() => import('./components/AdminPanel'))
+const SafetyControls       = lazy(() => import('./components/SafetyControls'))
+const ConsentFlow          = lazy(() => import('./components/ConsentFlow'))
+const SymbolPage           = lazy(() => import('./components/SymbolPage'))
+const StockBoard           = lazy(() => import('./components/StockBoard'))
+const BillingTab           = lazy(() => import('./components/BillingTab'))
+const DailyAdvisor         = lazy(() => import('./components/DailyAdvisor'))
+const AlpacaAccountPanel   = lazy(() => import('./components/AlpacaAccountPanel'))
+const CryptoBounceAnalysis = lazy(() => import('./components/CryptoBounceAnalysis'))
+// DailyPicksMini needs a separate lazy chunk since it's a named export
+const DailyPicksMini       = lazy(() => import('./components/DailyAdvisor').then(m => ({ default: m.DailyPicksMini })))
 
 const TABS = [
   { id: 'dashboard',   label: '📊', full: 'Dashboard'    },
@@ -179,16 +183,20 @@ function TradingApp() {
   )
 
   if (needsConsent) return (
-    <ConsentFlow user={user} onComplete={() => setNeedsConsent(false)}/>
+    <Suspense fallback={<div className="min-h-screen bg-dark-900 flex items-center justify-center"><div className="animate-spin w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full"/></div>}>
+      <ConsentFlow user={user} onComplete={() => setNeedsConsent(false)}/>
+    </Suspense>
   )
 
   // Full-page stock board — takes over entire screen
   if (boardSymbol) return (
-    <StockBoard
-      symbol={boardSymbol}
-      currentUserId={user?.id}
-      onBack={() => setBoardSymbol(null)}
-    />
+    <Suspense fallback={<div className="min-h-screen bg-dark-900 flex items-center justify-center"><div className="animate-spin w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full"/></div>}>
+      <StockBoard
+        symbol={boardSymbol}
+        currentUserId={user?.id}
+        onBack={() => setBoardSymbol(null)}
+      />
+    </Suspense>
   )
 
   const pnl         = data?.total_pnl ?? data?.realized_pnl ?? 0
@@ -330,16 +338,23 @@ function TradingApp() {
 
       {/* Content */}
       <main className="flex-1 max-w-screen-xl w-full mx-auto p-4 md:p-6 overflow-auto">
+       <Suspense fallback={<div className="flex items-center justify-center py-20"><div className="animate-spin w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full"/></div>}>
         {tab === 'dashboard'   && (
           <div className="space-y-5">
             {/* Chart full-width on top */}
-            <PortfolioChart capital={capital}/>
+            <Suspense fallback={<div className="h-48 bg-dark-800 rounded-2xl animate-pulse"/>}>
+              <PortfolioChart capital={capital}/>
+            </Suspense>
 
             {/* Alpaca account mirror + Daily picks, side by side */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <AlpacaAccountPanel/>
+              <Suspense fallback={<div className="h-32 bg-dark-800 rounded-2xl animate-pulse"/>}>
+                <AlpacaAccountPanel/>
+              </Suspense>
               <div className="bg-dark-800 border border-dark-600 rounded-2xl p-4">
-                <DailyPicksMini onNavigate={setTab}/>
+                <Suspense fallback={<div className="h-24 animate-pulse"/>}>
+                  <DailyPicksMini onNavigate={setTab}/>
+                </Suspense>
               </div>
             </div>
 
@@ -376,6 +391,7 @@ function TradingApp() {
         {tab === 'settings'    && <Settings/>}
         {tab === 'profile'     && <UserProfile/>}
         {tab === 'billing'     && <BillingTab/>}
+       </Suspense>
       </main>
 
       <footer className="text-center py-2 text-xs text-gray-700 border-t border-dark-800">

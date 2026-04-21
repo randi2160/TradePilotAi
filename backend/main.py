@@ -1825,6 +1825,204 @@ async def active(n: int = 10, user: User = Depends(get_current_user)):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Daily Advisor — User Picks, AI Recommendations, Optimizer
+# ══════════════════════════════════════════════════════════════════════════════
+
+from database.models import DailyUserPick, AIRecommendation, AIPickAnalysis
+
+def _today() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+@app.get("/api/daily/picks", tags=["Daily Advisor"])
+async def get_daily_picks(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.query(DailyUserPick).filter(
+        DailyUserPick.user_id == user.id,
+        DailyUserPick.trade_date == _today(),
+    ).all()
+    picks = []
+    for r in rows:
+        # Attach latest analysis if any
+        analysis = db.query(AIPickAnalysis).filter(
+            AIPickAnalysis.user_id == user.id,
+            AIPickAnalysis.symbol == r.symbol,
+            AIPickAnalysis.trade_date == _today(),
+        ).order_by(AIPickAnalysis.created_at.desc()).first()
+        picks.append({
+            "id": r.id, "symbol": r.symbol, "note": r.note,
+            "analysis": {
+                "signal": analysis.signal, "confidence": analysis.confidence,
+                "score": analysis.score, "entry": analysis.entry,
+                "exit_target": analysis.exit_target, "stop": analysis.stop,
+                "risk_reward": analysis.risk_reward, "reasoning": analysis.reasoning,
+                "vs_ai_verdict": analysis.vs_ai_verdict,
+            } if analysis else None,
+        })
+    return {"picks": picks}
+
+class DailyPickBody(BaseModel):
+    symbol: str
+    note: str = ""
+
+@app.post("/api/daily/picks", tags=["Daily Advisor"])
+async def add_daily_pick(body: DailyPickBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sym = body.symbol.upper().strip()
+    if not sym:
+        raise HTTPException(400, "Symbol required")
+    # Prevent duplicates for today
+    exists = db.query(DailyUserPick).filter(
+        DailyUserPick.user_id == user.id,
+        DailyUserPick.symbol == sym,
+        DailyUserPick.trade_date == _today(),
+    ).first()
+    if exists:
+        return {"ok": True, "msg": "Already in your picks"}
+    db.add(DailyUserPick(user_id=user.id, symbol=sym, note=body.note, trade_date=_today()))
+    db.commit()
+    return {"ok": True, "symbol": sym}
+
+@app.delete("/api/daily/picks/{symbol}", tags=["Daily Advisor"])
+async def remove_daily_pick(symbol: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sym = symbol.upper().strip()
+    db.query(DailyUserPick).filter(
+        DailyUserPick.user_id == user.id,
+        DailyUserPick.symbol == sym,
+        DailyUserPick.trade_date == _today(),
+    ).delete()
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/daily/picks/{symbol}/analyze", tags=["Daily Advisor"])
+async def analyze_daily_pick(symbol: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Run quick analysis on a user's pick using the market scanner."""
+    sym = symbol.upper().strip()
+    try:
+        scan_data = await mkt_scanner.scan()
+        result = next((s for s in scan_data if s.get("symbol","").upper() == sym), None)
+        if not result:
+            # Try a lightweight score
+            result = {"symbol": sym, "signal": "HOLD", "confidence": 50, "score": 50}
+        analysis = AIPickAnalysis(
+            user_id=user.id, symbol=sym, trade_date=_today(),
+            signal=result.get("signal", "HOLD"),
+            confidence=int(result.get("confidence", 50)),
+            score=float(result.get("score", 0)),
+            entry=float(result.get("entry", 0)),
+            exit_target=float(result.get("exit_target", 0)),
+            stop=float(result.get("stop", 0)),
+            risk_reward=float(result.get("risk_reward", 0) or 0),
+            reasoning=result.get("reasoning", "Scanned via market scanner"),
+        )
+        db.add(analysis)
+        db.commit()
+        return {"ok": True, "signal": analysis.signal, "confidence": analysis.confidence}
+    except Exception as e:
+        logger.warning(f"Analyze pick {sym}: {e}")
+        return {"ok": False, "error": str(e)}
+
+@app.get("/api/daily/recommendations", tags=["Daily Advisor"])
+async def get_daily_recommendations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.query(AIRecommendation).filter(
+        AIRecommendation.user_id == user.id,
+        AIRecommendation.trade_date == _today(),
+    ).order_by(AIRecommendation.rank).all()
+    pending = sum(1 for r in rows if r.status == "pending")
+    recs = [{
+        "id": r.id, "symbol": r.symbol, "rank": r.rank,
+        "signal": r.signal, "confidence": r.confidence, "score": r.score,
+        "entry": r.entry, "exit_target": r.exit_target, "stop": r.stop,
+        "risk_reward": r.risk_reward, "suggested_qty": r.suggested_qty,
+        "suggested_alloc": r.suggested_alloc, "reasoning": r.reasoning,
+        "source": r.source, "status": r.status,
+        "eligible_for_auto": r.eligible_for_auto,
+    } for r in rows]
+    return {"recs": recs, "pending": pending}
+
+class ReviewBody(BaseModel):
+    action: str  # "accepted" | "rejected"
+
+@app.post("/api/daily/recommendations/{rec_id}/review", tags=["Daily Advisor"])
+async def review_recommendation(rec_id: int, body: ReviewBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rec = db.query(AIRecommendation).filter(
+        AIRecommendation.id == rec_id,
+        AIRecommendation.user_id == user.id,
+    ).first()
+    if not rec:
+        raise HTTPException(404, "Recommendation not found")
+    rec.status = body.action
+    rec.reviewed_at = datetime.utcnow()
+    if body.action == "accepted":
+        rec.accepted_at = datetime.utcnow()
+        rec.eligible_for_auto = True
+    db.commit()
+    return {"ok": True, "status": rec.status}
+
+@app.get("/api/daily/optimizer", tags=["Daily Advisor"])
+async def get_daily_optimizer(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return portfolio optimization summary for the day."""
+    account = {}
+    user_bot = get_user_bot_if_exists(user.id)
+    if user_bot and user_bot.broker:
+        try:
+            account = user_bot.broker.get_account()
+        except Exception:
+            pass
+    equity = float(account.get("equity", user.capital or 5000))
+    buying_power = float(account.get("non_marginable_buying_power", account.get("cash", equity)))
+    # Count today's accepted recs
+    accepted = db.query(AIRecommendation).filter(
+        AIRecommendation.user_id == user.id,
+        AIRecommendation.trade_date == _today(),
+        AIRecommendation.status == "accepted",
+    ).count()
+    return {
+        "equity": round(equity, 2),
+        "buying_power": round(buying_power, 2),
+        "daily_budget": round(equity * 0.20, 2),  # 20% max daily allocation
+        "accepted_trades": accepted,
+        "max_position_size": round(equity * 0.10, 2),
+    }
+
+@app.post("/api/daily/scan", tags=["Daily Advisor"])
+async def run_daily_scan(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Run AI market scan and generate fresh recommendations for today."""
+    try:
+        scan_results = await mkt_scanner.scan()
+        # Clear old recs for today
+        db.query(AIRecommendation).filter(
+            AIRecommendation.user_id == user.id,
+            AIRecommendation.trade_date == _today(),
+            AIRecommendation.status == "pending",
+        ).delete()
+        db.commit()
+
+        # Take top scored results as recommendations
+        top = sorted(scan_results, key=lambda x: x.get("score", 0), reverse=True)[:5]
+        for i, item in enumerate(top, 1):
+            rec = AIRecommendation(
+                user_id=user.id,
+                symbol=item.get("symbol", ""),
+                rank=i,
+                signal=item.get("signal", "HOLD"),
+                confidence=int(item.get("confidence", 50)),
+                score=float(item.get("score", 0)),
+                entry=float(item.get("entry", 0) or 0),
+                exit_target=float(item.get("exit_target", 0) or 0),
+                stop=float(item.get("stop", 0) or 0),
+                risk_reward=float(item.get("risk_reward", 0) or 0),
+                reasoning=item.get("reasoning", f"Top {i} by market scan score"),
+                source="scanner",
+                trade_date=_today(),
+                status="pending",
+            )
+            db.add(rec)
+        db.commit()
+        return {"ok": True, "count": len(top)}
+    except Exception as e:
+        logger.warning(f"Daily scan: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Settings & Watchlist
 # ══════════════════════════════════════════════════════════════════════════════
 
