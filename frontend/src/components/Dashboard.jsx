@@ -305,9 +305,16 @@ function LiveEngineStatus({ data, engineStatus, dualSummary, todayStats }) {
 
 // ── Crypto Live Panel ─────────────────────────────────────────────────────────
 function CryptoLivePanel({ engineStatus }) {
+  const [localThreshold, setLocalThreshold] = useState(null)
+  const [saving, setSaving]                 = useState(false)
+
   if (!engineStatus?.crypto_running) return null
   const crypto = engineStatus?.crypto
   if (!crypto) return null
+
+  // Score threshold — from live engine status, overridden by local slider
+  const serverThreshold = crypto.score_threshold || 55
+  const threshold       = localThreshold ?? serverThreshold
 
   const scans    = crypto.scan_results || []
   const openList = crypto.open_position_list || []
@@ -396,13 +403,53 @@ function CryptoLivePanel({ engineStatus }) {
           </div>
         )}
 
+        {/* Score Threshold Slider */}
+        <div className="p-3 bg-dark-700 border border-dark-600 rounded-xl">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-bold text-white">Score Threshold</span>
+            <span className={cls('text-sm font-black',
+              threshold <= 30 ? 'text-red-400' : threshold <= 50 ? 'text-yellow-400' : 'text-green-400')}>
+              {threshold}
+              <span className="text-[10px] font-normal text-gray-500 ml-1">
+                {threshold <= 30 ? '(aggressive)' : threshold <= 50 ? '(moderate)' : '(conservative)'}
+              </span>
+            </span>
+          </div>
+          <input
+            type="range" min={15} max={85} step={5} value={threshold}
+            className="w-full accent-brand-500 h-1.5 cursor-pointer"
+            onChange={e => setLocalThreshold(Number(e.target.value))}
+            onMouseUp={() => {
+              if (localThreshold != null && localThreshold !== serverThreshold) {
+                setSaving(true)
+                api.put('/settings/score-threshold', { score_threshold: localThreshold })
+                  .then(() => setSaving(false))
+                  .catch(() => setSaving(false))
+              }
+            }}
+            onTouchEnd={() => {
+              if (localThreshold != null && localThreshold !== serverThreshold) {
+                setSaving(true)
+                api.put('/settings/score-threshold', { score_threshold: localThreshold })
+                  .then(() => setSaving(false))
+                  .catch(() => setSaving(false))
+              }
+            }}
+          />
+          <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+            <span>15 (high risk)</span>
+            <span>85 (low risk)</span>
+          </div>
+          {saving && <p className="text-[10px] text-brand-400 mt-1">Saving...</p>}
+        </div>
+
         {/* Scan results */}
         {scans.length > 0 && (
           <div>
             <p className="text-xs font-bold text-white mb-2">
               📡 Last Scan Results
               <span className="text-gray-500 font-normal ml-2">
-                — scored {scans.length} symbols · needs score &gt; 40 to trade
+                — scored {scans.length} symbols · needs score &gt; {threshold} to trade
               </span>
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -418,10 +465,10 @@ function CryptoLivePanel({ engineStatus }) {
                   </div>
                   {/* Score bar */}
                   <div className="h-1.5 bg-dark-600 rounded-full overflow-hidden mb-1">
-                    <div className={cls('h-1.5 rounded-full', s.score >= 60 ? 'bg-green-500' : s.score >= 40 ? 'bg-yellow-500' : 'bg-gray-600')}
+                    <div className={cls('h-1.5 rounded-full', s.score >= threshold + 15 ? 'bg-green-500' : s.score >= threshold ? 'bg-yellow-500' : 'bg-gray-600')}
                       style={{ width: Math.min(s.score, 100) + '%' }} />
                   </div>
-                  <div className={cls('text-xs font-bold', s.score >= 60 ? 'text-green-400' : s.score >= 40 ? 'text-yellow-400' : 'text-gray-500')}>
+                  <div className={cls('text-xs font-bold', s.score >= threshold + 15 ? 'text-green-400' : s.score >= threshold ? 'text-yellow-400' : 'text-gray-500')}>
                     Score: {s.score}
                   </div>
                   <div className="text-xs text-gray-600">

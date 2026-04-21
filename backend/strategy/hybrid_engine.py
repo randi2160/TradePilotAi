@@ -233,7 +233,7 @@ class HybridEngine:
                 crypto_alloc      = split["crypto_pct"],
                 min_scalp_profit  = 5,
                 compound_mode     = True,
-                min_probability   = 0.55,
+                min_probability   = self.settings.get_score_threshold() / 100.0,
                 max_positions     = 2,
                 user_id           = self.user_id,
                 ensemble          = self.ensemble,

@@ -146,6 +146,7 @@ class SettingsManager:
             "crypto_alloc_pct":           self._data.get("crypto_alloc_pct",       0.30),
             "after_hours_crypto_alloc_pct": self._data.get("after_hours_crypto_alloc_pct", 0.80),
             "crypto_strategy":            self._data.get("crypto_strategy", "scalp"),
+            "score_threshold":            self._data.get("score_threshold", 55),
             "updated_at":                 self._data.get("updated_at", ""),
         }
 
@@ -164,6 +165,17 @@ class SettingsManager:
 
     def get_after_hours_crypto_alloc(self) -> float:
         return float(self._data.get("after_hours_crypto_alloc_pct", 0.80))
+
+    def get_score_threshold(self) -> int:
+        """Minimum score (0-100) for a crypto candidate to be considered valid.
+        Lower = more aggressive (more trades), higher = more conservative."""
+        return int(self._data.get("score_threshold", 55))
+
+    def set_score_threshold(self, value: int):
+        value = max(15, min(85, int(value)))
+        self._data["score_threshold"] = value
+        self._save()
+        logger.info(f"Score threshold updated to {value}")
 
     def get_profit_milestones(self) -> list:
         """

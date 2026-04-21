@@ -1931,6 +1931,35 @@ async def update_engine_settings(
 
     return {**settings.all(), "status": "engine_settings_saved"}
 
+# ── Score Threshold (dynamic risk control) ─────────────────────────────────
+
+class ScoreThresholdBody(BaseModel):
+    score_threshold: int = 55
+
+@app.get("/api/settings/score-threshold", tags=["Settings"])
+async def get_score_threshold(user: User = Depends(get_current_user)):
+    return {"score_threshold": settings.get_score_threshold()}
+
+@app.put("/api/settings/score-threshold", tags=["Settings"])
+async def update_score_threshold(
+    body: ScoreThresholdBody,
+    user: User = Depends(get_current_user),
+):
+    """Dynamically adjust the minimum score for crypto trading.
+    Lower = more aggressive, higher = more conservative.
+    The running engine picks this up on the next scan cycle."""
+    val = max(15, min(85, body.score_threshold))
+    settings.set_score_threshold(val)
+
+    # Push into live crypto engine immediately
+    global _hybrid_engine
+    if _hybrid_engine and _hybrid_engine.crypto_engine:
+        _hybrid_engine.crypto_engine.min_probability = val / 100.0
+        logger.info(f"Live crypto engine threshold updated to {val} (prob={val/100:.2f})")
+
+    return {"score_threshold": val, "status": "updated"}
+
+
 @app.get("/api/watchlist",              tags=["Watchlist"])
 async def get_watchlist(user: User = Depends(get_current_user)):
     return {"watchlist": settings.get_watchlist()}

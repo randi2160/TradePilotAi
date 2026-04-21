@@ -1332,6 +1332,7 @@ class CryptoEngine:
             "last_error":        self._last_error,
             "cycle":             self.cycle_count,
             "min_probability":   self.min_probability,
+            "score_threshold":   int(self.min_probability * 100),
             "consecutive_losses": self.consecutive_losses,
             "buying_power":      _safe_round(min(bp_raw, budget)) if bp_raw else budget,
             "crypto_budget":     budget,
