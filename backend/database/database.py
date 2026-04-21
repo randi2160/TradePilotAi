@@ -84,10 +84,38 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def _add_missing_columns():
+    """Add new columns to existing tables — SQLAlchemy create_all won't do this."""
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if "users" not in inspector.get_table_names():
+        return  # tables haven't been created yet
+    existing = {c["name"] for c in inspector.get_columns("users")}
+    new_cols = {
+        "watchlist_json":              "TEXT DEFAULT ''",
+        "engine_mode":                 "VARCHAR(20) DEFAULT 'stocks_only'",
+        "crypto_alloc_pct":            "FLOAT DEFAULT 0.30",
+        "after_hours_crypto_alloc_pct":"FLOAT DEFAULT 0.80",
+        "crypto_strategy":             "VARCHAR(10) DEFAULT 'scalp'",
+        "score_threshold":             "INTEGER DEFAULT 55",
+        "stop_new_trades_hour":        "INTEGER DEFAULT 15",
+        "stop_new_trades_minute":      "INTEGER DEFAULT 30",
+        "max_open_positions":          "INTEGER DEFAULT 3",
+    }
+    with engine.begin() as conn:
+        for col, typedef in new_cols.items():
+            if col not in existing:
+                try:
+                    conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {typedef}"))
+                    logger.info(f"  + users.{col} added")
+                except Exception as e:
+                    logger.debug(f"  users.{col}: {e}")
+
 def init_db():
     """Initialize database - create all tables if they don't exist"""
     try:
         Base.metadata.create_all(bind=engine)
+        _add_missing_columns()
         db_type = "PostgreSQL" if _is_postgres else "SQLite"
         logger.info(f"Database ready ✓ ({db_type}: {DATABASE_URL[:50]}...)")
     except Exception as e:

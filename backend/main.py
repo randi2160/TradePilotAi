@@ -171,7 +171,47 @@ _sys.excepthook = _log_unhandled
 limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 
 # ── Shared singletons (infrastructure — read-only or shared by design) ───────
-settings     = SettingsManager()
+settings     = SettingsManager()   # LEGACY: only used for server-level defaults now
+
+import json as _json
+
+def _default_watchlist():
+    return ["AAPL","MSFT","NVDA","TSLA","AMD","SPY","QQQ","AMZN","META","GOOGL","NFLX","COIN","MSTR","PLTR","SOFI"]
+
+def get_user_watchlist(user) -> list:
+    """Get per-user watchlist from DB, falling back to defaults."""
+    if user.watchlist_json:
+        try:
+            wl = _json.loads(user.watchlist_json)
+            if isinstance(wl, list) and len(wl) > 0:
+                return wl
+        except Exception:
+            pass
+    return _default_watchlist()
+
+def set_user_watchlist(user, symbols: list, db):
+    """Save per-user watchlist to DB."""
+    clean = [s.upper().strip() for s in symbols if s.strip()]
+    user.watchlist_json = _json.dumps(clean)
+    db.commit()
+
+def get_user_settings_dict(user) -> dict:
+    """Build a per-user settings dict from the User model — never leaks other users' data."""
+    return {
+        "capital":                      float(user.capital or 5000),
+        "daily_target_min":             float(user.daily_target_min or 100),
+        "daily_target_max":             float(user.daily_target_max or 250),
+        "max_daily_loss":               float(user.max_daily_loss or 150),
+        "watchlist":                    get_user_watchlist(user),
+        "engine_mode":                  user.engine_mode or "stocks_only",
+        "crypto_alloc_pct":             float(user.crypto_alloc_pct or 0.30),
+        "after_hours_crypto_alloc_pct": float(user.after_hours_crypto_alloc_pct or 0.80),
+        "crypto_strategy":              user.crypto_strategy or "scalp",
+        "score_threshold":              int(user.score_threshold or 55),
+        "stop_new_trades_hour":         int(user.stop_new_trades_hour or 15),
+        "stop_new_trades_minute":       int(user.stop_new_trades_minute or 30),
+        "max_open_positions":           int(user.max_open_positions or 3),
+    }
 
 # ── Per-user bot registry ────────────────────────────────────────────────────
 # Each user who calls /api/bot/start gets their OWN BotLoop + tracker,
@@ -188,14 +228,14 @@ def get_user_bot(user) -> BotLoop:
     """Fetch or lazily create this user's BotLoop + DailyTargetTracker."""
     if user.id not in _bot_registry:
         t = DailyTargetTracker(
-            capital          = settings.get_capital(),
-            daily_target_min = settings.get_targets()["daily_target_min"],
-            daily_target_max = settings.get_targets()["daily_target_max"],
-            max_daily_loss   = settings.get_targets()["max_daily_loss"],
+            capital          = float(user.capital or 5000),
+            daily_target_min = float(user.daily_target_min or 100),
+            daily_target_max = float(user.daily_target_max or 250),
+            max_daily_loss   = float(user.max_daily_loss or 150),
             user_id          = user.id,
         )
         bot = BotLoop(t, user_id=user.id)
-        bot.watchlist = settings.get_watchlist()
+        bot.watchlist = get_user_watchlist(user)
         _bot_registry[user.id] = bot
     return _bot_registry[user.id]
 
@@ -554,14 +594,15 @@ async def ws_endpoint(ws: WebSocket, token: Optional[str] = None):
                         "signals":          [],
                         "pending_trades":   [],
                         "unusual_volume":   [],
-                        "active_watchlist": settings.get_watchlist(),
+                        "active_watchlist": get_user_watchlist(user),
                         "wl_scores":        {},
                         "realized_pnl":     0,
                         "unrealized_pnl":   round(_ws_upnl, 2),
                         "total_pnl":        round(_ws_upnl, 2),
                         "trade_count":      0,
                     }
-                summary["settings"] = settings.all()
+                # Per-user settings — never leak another user's config
+                summary["settings"] = get_user_settings_dict(user)
 
                 # Merge crypto engine P&L into the top-level summary.
                 # _hybrid_engine is still a singleton owned by whoever last
@@ -998,14 +1039,12 @@ async def get_status(user: User = Depends(get_current_user)):
             "signals":           [],
             "pending_trades":    [],
             "unusual_volume":    [],
-            "active_watchlist":  settings.get_watchlist(),
+            "active_watchlist":  get_user_watchlist(user),
             "wl_scores":         {},
         }
 
     # SECURITY: always overwrite account + positions with the CALLER's own
-    # broker. get_live_summary() uses user_bot.broker, which is already the
-    # caller's broker when they've started their own bot — but if the bot
-    # was started before we store user creds, this is still a safety net.
+    # broker — never leak another user's positions.
     _usr_broker = _resolve_broker(user)
     if _usr_broker:
         try:
@@ -1018,7 +1057,7 @@ async def get_status(user: User = Depends(get_current_user)):
     else:
         s["account"]   = {}
         s["positions"] = []
-    s["settings"] = settings.all()
+    s["settings"] = get_user_settings_dict(user)
     return s
 
 @app.post("/api/train",      tags=["Bot"])
@@ -1719,7 +1758,7 @@ async def sentiment(symbol: str, user: User = Depends(get_current_user)):
 
 @app.get("/api/sentiment/watchlist/all", tags=["News"])
 async def watchlist_sentiment(user: User = Depends(get_current_user)):
-    return await news_scanner.scan_watchlist(settings.get_watchlist())
+    return await news_scanner.scan_watchlist(get_user_watchlist(user))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1729,7 +1768,7 @@ async def watchlist_sentiment(user: User = Depends(get_current_user)):
 @app.get("/api/ai/advice",         tags=["AI Advisor"])
 async def get_advice(force: bool = False, user: User = Depends(get_current_user)):
     scan      = await mkt_scanner.scan()
-    sentiment = await news_scanner.scan_watchlist(settings.get_watchlist())
+    sentiment = await news_scanner.scan_watchlist(get_user_watchlist(user))
     # Per-user signals + stats. If user hasn't started a bot, show empty
     # signals and a zeroed tracker snapshot rather than leaking admin P&L.
     user_bot  = get_user_bot_if_exists(user.id)
@@ -1744,7 +1783,7 @@ async def get_advice(force: bool = False, user: User = Depends(get_current_user)
 @app.get("/api/ai/watchlist-suggest", tags=["AI Advisor"])
 async def suggest_watchlist(user: User = Depends(get_current_user)):
     scan      = await mkt_scanner.scan()
-    sentiment = await news_scanner.scan_watchlist(settings.get_watchlist())
+    sentiment = await news_scanner.scan_watchlist(get_user_watchlist(user))
     # Use THIS user's bot signals + watchlist builder so scoring reflects
     # their own holdings + scan history, not the admin's.
     user_bot  = get_user_bot(user)
@@ -2028,7 +2067,7 @@ async def run_daily_scan(user: User = Depends(get_current_user), db: Session = D
 
 @app.get("/api/settings",              tags=["Settings"])
 async def get_settings(user: User = Depends(get_current_user)):
-    return {**settings.all(), "user": {"email": user.email, "capital": user.capital}}
+    return {**get_user_settings_dict(user), "user": {"email": user.email, "capital": user.capital}}
 
 class CapitalBody(BaseModel):
     capital: float = Field(..., gt=100, le=1_000_000)
@@ -2037,10 +2076,7 @@ class CapitalBody(BaseModel):
 async def update_capital(body: CapitalBody,
                          user: User = Depends(get_current_user),
                          db:   Session = Depends(get_db)):
-    settings.set_capital(body.capital)
-    # Update THIS user's tracker if it exists. Shared `settings` stays the
-    # default used at tracker creation time for any user who hasn't started
-    # their bot yet.
+    # Save to THIS user's DB record only
     user_bot = get_user_bot_if_exists(user.id)
     if user_bot is not None:
         user_bot.tracker.capital = body.capital
@@ -2057,22 +2093,21 @@ class TargetsBody(BaseModel):
 async def update_targets(body: TargetsBody,
                          user: User = Depends(get_current_user),
                          db:   Session = Depends(get_db)):
-    settings.set_targets(body.daily_target_min, body.daily_target_max, body.max_daily_loss)
+    # Save to THIS user only
     user_bot = get_user_bot_if_exists(user.id)
     if user_bot is not None:
         user_bot.tracker.target_min     = body.daily_target_min
         user_bot.tracker.target_max     = body.daily_target_max
         user_bot.tracker.max_daily_loss = body.max_daily_loss
-        # Also sync risk manager's daily loss limit
         if hasattr(user_bot, 'risk'):
             user_bot.risk.daily_loss_lim = body.max_daily_loss
-            user_bot.risk.capital        = settings.get_capital()
+            user_bot.risk.capital        = float(user.capital or 5000)
         logger.info(f"Tracker+Risk updated: targets={body.daily_target_min}-{body.daily_target_max}, max_loss={body.max_daily_loss}")
     user.daily_target_min   = body.daily_target_min
     user.daily_target_max   = body.daily_target_max
     user.max_daily_loss     = body.max_daily_loss
     db.commit()
-    return {**settings.get_targets(), "status": "updated"}
+    return {"daily_target_min": user.daily_target_min, "daily_target_max": user.daily_target_max, "max_daily_loss": user.max_daily_loss, "status": "updated"}
 
 
 class EngineSettingsBody(BaseModel):
@@ -2105,29 +2140,28 @@ async def update_engine_settings(
     if body.crypto_strategy not in ("scalp", "bounce"):
         raise HTTPException(400, "crypto_strategy must be scalp | bounce")
 
-    settings.set_engine_settings(
-        body.stop_new_trades_hour,
-        body.stop_new_trades_minute,
-        body.max_open_positions,
-        body.engine_mode,
-        body.crypto_alloc_pct,
-        body.after_hours_crypto_alloc_pct,
-        body.crypto_strategy,
-    )
+    # Save to THIS user's DB record
+    user.engine_mode       = body.engine_mode
+    user.crypto_alloc_pct  = body.crypto_alloc_pct
+    user.after_hours_crypto_alloc_pct = body.after_hours_crypto_alloc_pct
+    user.crypto_strategy   = body.crypto_strategy
+    user.stop_new_trades_hour   = body.stop_new_trades_hour
+    user.stop_new_trades_minute = body.stop_new_trades_minute
+    user.max_open_positions     = body.max_open_positions
+    db.commit()
 
     # Update live hybrid engine if running
     global _hybrid_engine
     if _hybrid_engine:
         _hybrid_engine.crypto_alloc            = body.crypto_alloc_pct
-        # If strategy changed, reset crypto engine so it picks up the new one
         if _hybrid_engine.crypto_strategy != body.crypto_strategy:
             logger.info(f"Crypto strategy changed: {_hybrid_engine.crypto_strategy} → {body.crypto_strategy}")
             _hybrid_engine.crypto_strategy = body.crypto_strategy
-            _hybrid_engine.crypto_engine   = None  # will reinit on next cycle
+            _hybrid_engine.crypto_engine   = None
         _hybrid_engine.after_hours_crypto_alloc = body.after_hours_crypto_alloc_pct
         logger.info(f"Live engine updated: market={body.crypto_alloc_pct:.0%} after-hours={body.after_hours_crypto_alloc_pct:.0%}")
 
-    return {**settings.all(), "status": "engine_settings_saved"}
+    return {**get_user_settings_dict(user), "status": "engine_settings_saved"}
 
 # ── Score Threshold (dynamic risk control) ─────────────────────────────────
 
@@ -2136,18 +2170,18 @@ class ScoreThresholdBody(BaseModel):
 
 @app.get("/api/settings/score-threshold", tags=["Settings"])
 async def get_score_threshold(user: User = Depends(get_current_user)):
-    return {"score_threshold": settings.get_score_threshold()}
+    return {"score_threshold": int(user.score_threshold or 55)}
 
 @app.put("/api/settings/score-threshold", tags=["Settings"])
 async def update_score_threshold(
     body: ScoreThresholdBody,
     user: User = Depends(get_current_user),
+    db:   Session = Depends(get_db),
 ):
-    """Dynamically adjust the minimum score for crypto trading.
-    Lower = more aggressive, higher = more conservative.
-    The running engine picks this up on the next scan cycle."""
+    """Dynamically adjust the minimum score for crypto trading."""
     val = max(15, min(85, body.score_threshold))
-    settings.set_score_threshold(val)
+    user.score_threshold = val
+    db.commit()
 
     # Push into live crypto engine immediately
     global _hybrid_engine
@@ -2160,44 +2194,48 @@ async def update_score_threshold(
 
 @app.get("/api/watchlist",              tags=["Watchlist"])
 async def get_watchlist(user: User = Depends(get_current_user)):
-    return {"watchlist": settings.get_watchlist()}
+    return {"watchlist": get_user_watchlist(user)}
 
 class WatchlistBody(BaseModel):
     symbols: List[str]
 
-def _refresh_all_bots_watchlist():
-    """Shared watchlist is stored in settings; push the new list into every
-    running user bot. Swallow per-bot errors so one bad bot can't block the
-    settings write."""
-    for uid, bot in list(_bot_registry.items()):
+def _refresh_user_bot_watchlist(user_id: int, watchlist: list):
+    """Push updated watchlist into this user's running bot only."""
+    bot = _bot_registry.get(user_id)
+    if bot:
         try:
+            bot.watchlist = watchlist
             bot.refresh_watchlist()
         except Exception as e:
-            logger.warning(f"refresh_watchlist user={uid}: {e}")
+            logger.warning(f"refresh_watchlist user={user_id}: {e}")
 
 @app.put("/api/watchlist",              tags=["Watchlist"])
-async def set_watchlist(body: WatchlistBody, user: User = Depends(get_current_user)):
-    settings.set_watchlist(body.symbols)
-    _refresh_all_bots_watchlist()
-    return {"watchlist": settings.get_watchlist()}
+async def set_watchlist(body: WatchlistBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    set_user_watchlist(user, body.symbols, db)
+    wl = get_user_watchlist(user)
+    _refresh_user_bot_watchlist(user.id, wl)
+    return {"watchlist": wl}
 
 class SymbolBody(BaseModel):
     symbol: str
 
 @app.post("/api/watchlist/add",         tags=["Watchlist"])
-async def add_symbol(body: SymbolBody, user: User = Depends(get_current_user)):
-    settings.add_symbol(body.symbol)
-    _refresh_all_bots_watchlist()
-    wl = settings.get_watchlist()
-    logger.info(f"Symbol {body.symbol.upper()} added. Watchlist now: {wl}")
-    return {"watchlist": wl, "added": body.symbol.upper(), "status": "saved"}
+async def add_symbol(body: SymbolBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    wl = get_user_watchlist(user)
+    sym = body.symbol.upper().strip()
+    if sym not in wl:
+        wl.append(sym)
+    set_user_watchlist(user, wl, db)
+    _refresh_user_bot_watchlist(user.id, wl)
+    logger.info(f"Symbol {sym} added for user {user.id}. Watchlist now: {wl}")
+    return {"watchlist": wl, "added": sym, "status": "saved"}
 
 @app.delete("/api/watchlist/{symbol}",  tags=["Watchlist"])
-async def remove_symbol(symbol: str, user: User = Depends(get_current_user)):
-    settings.remove_symbol(symbol)
-    _refresh_all_bots_watchlist()
-    wl = settings.get_watchlist()
-    logger.info(f"Symbol {symbol.upper()} removed. Watchlist now: {wl}")
+async def remove_symbol(symbol: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    wl = [s for s in get_user_watchlist(user) if s != symbol.upper().strip()]
+    set_user_watchlist(user, wl, db)
+    _refresh_user_bot_watchlist(user.id, wl)
+    logger.info(f"Symbol {symbol.upper()} removed for user {user.id}. Watchlist now: {wl}")
     return {"watchlist": wl, "removed": symbol.upper()}
 
 
@@ -2494,7 +2532,7 @@ async def live_activity(user: User = Depends(get_current_user)):
         "signals":   signals,
         "events":    reporter.get_events(30),
         "bot_status":       user_bot.status    if user_bot else "stopped",
-        "active_watchlist": user_bot.watchlist if user_bot else settings.get_watchlist(),
+        "active_watchlist": user_bot.watchlist if user_bot else get_user_watchlist(user),
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2707,7 +2745,7 @@ async def get_watchlist_scores(user: User = Depends(get_current_user)):
 @app.get("/api/ticker", tags=["Data"])
 async def get_live_ticker(user: User = Depends(get_current_user)):
     """Get live prices for all watchlist symbols."""
-    wl = settings.get_watchlist()
+    wl = get_user_watchlist(user)
     if not wl:
         return {}
     try:
@@ -2737,12 +2775,12 @@ async def get_active_watchlist(user: User = Depends(get_current_user)):
             "scores":   scores.get("scores", {}),
             "built_at": scores.get("built_at", ""),
             "total_scanned": scores.get("total_scanned", 0),
-            "manual_also_scanned": settings.get_watchlist(),
+            "manual_also_scanned": get_user_watchlist(user),
         }
     else:
         return {
             "mode":      "manual",
-            "watchlist": settings.get_watchlist(),
+            "watchlist": get_user_watchlist(user),
             "scores":    {},
         }
 

@@ -41,6 +41,17 @@ class User(Base):
     live_mode_enabled= Column(Boolean,    default=False)  # must pass safety check to enable
     live_mode_at     = Column(DateTime,   nullable=True)
 
+    # Per-user watchlist + engine settings (previously stored in shared JSON file)
+    watchlist_json    = Column(Text,    default="")       # JSON array of symbols
+    engine_mode       = Column(String(20), default="stocks_only")  # stocks_only|crypto_only|hybrid
+    crypto_alloc_pct  = Column(Float,   default=0.30)
+    after_hours_crypto_alloc_pct = Column(Float, default=0.80)
+    crypto_strategy   = Column(String(10), default="scalp")
+    score_threshold   = Column(Integer, default=55)
+    stop_new_trades_hour   = Column(Integer, default=15)
+    stop_new_trades_minute = Column(Integer, default=30)
+    max_open_positions     = Column(Integer, default=3)
+
     # Preferences
     email_alerts     = Column(Boolean, default=True)
     trading_mode     = Column(String(10), default="auto")
@@ -678,17 +689,4 @@ class AIPickAnalysis(Base):
     reasoning      = Column(Text, nullable=True)
     vs_ai_verdict  = Column(Text, nullable=True)   # honest comparison text
     full_report    = Column(Text, nullable=True)   # JSON full analysis
-    created_at     = Column(DateTime, default=datetime.utcnow)
-
-
-class UserReviewLog(Base):
-    """Audit log of user reviewing and accepting AI suggestions."""
-    __tablename__ = "user_review_logs"
-    id              = Column(Integer, primary_key=True, index=True)
-    user_id         = Column(Integer, nullable=False, index=True)
-    recommendation_id = Column(Integer, nullable=True)
-    symbol          = Column(String(20), nullable=False)
-    action          = Column(String(20), nullable=False)  # reviewed | accepted | rejected
-    notes           = Column(String(300), nullable=True)
-    ip_address      = Column(String(50), nullable=True)
-    created_at      = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at     = Column(DateTime, defaul

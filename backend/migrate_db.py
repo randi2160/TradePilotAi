@@ -253,6 +253,40 @@ def migrate_daily_advisor():
     conn.close()
 
 
+def migrate_user_isolation():
+    """Add per-user settings columns so users don't share a global config."""
+    if not os.path.exists(DB_PATH):
+        return
+    conn   = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    new_columns = {
+        "watchlist_json":              "TEXT DEFAULT ''",
+        "engine_mode":                 "TEXT DEFAULT 'stocks_only'",
+        "crypto_alloc_pct":            "REAL DEFAULT 0.30",
+        "after_hours_crypto_alloc_pct":"REAL DEFAULT 0.80",
+        "crypto_strategy":             "TEXT DEFAULT 'scalp'",
+        "score_threshold":             "INTEGER DEFAULT 55",
+        "stop_new_trades_hour":        "INTEGER DEFAULT 15",
+        "stop_new_trades_minute":      "INTEGER DEFAULT 30",
+        "max_open_positions":          "INTEGER DEFAULT 3",
+    }
+
+    cursor.execute("PRAGMA table_info(users)")
+    existing = {row[1] for row in cursor.fetchall()}
+
+    for col, typedef in new_columns.items():
+        if col not in existing:
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
+                print(f"  + users.{col} added")
+            except Exception as e:
+                print(f"  ! users.{col}: {e}")
+
+    conn.commit()
+    conn.close()
+
+
 # ── ONE entry point — runs everything in order ───────────────────────────────
 if __name__ == "__main__":
     print("=" * 50)
@@ -264,6 +298,7 @@ if __name__ == "__main__":
     migrate_ai_cache()
     migrate_trading_alerts()
     migrate_daily_advisor()
+    migrate_user_isolation()
 
     print("=" * 50)
     print("All migrations complete!")
