@@ -195,6 +195,41 @@ class StrategyEngine:
             logger.debug(f"Skipping {side} signal for {symbol} — only BUY (long) trades enabled")
             return
 
+        # ── Pre-trade floor gate (gain-protection enforcement) ────────────────
+        # The protection service already REACTS to breaches by halting the bot
+        # and closing everything, but until now nothing stopped us from opening
+        # a trade that would CAUSE the breach. Compute worst-case loss against
+        # the position's stop-loss; if that drops live equity below the user's
+        # locked floor, refuse the entry entirely. Per-user — legacy system bot
+        # (no user_id) retains old behaviour.
+        if self.user_id:
+            try:
+                from database.database import SessionLocal as _FloorSL
+                from services          import protection_service as _prot
+                with _FloorSL() as _fdb:
+                    _fs = _prot.get_or_create(_fdb, self.user_id)
+                    if _fs.enabled and float(_fs.floor_value or 0) > 0:
+                        _acct  = self.broker.get_account() or {}
+                        _live  = float(_acct.get("equity", 0) or 0)
+                        _stop  = float(sizing.get("stop_loss", 0) or 0)
+                        _qty   = int(sizing.get("qty", 0) or 0)
+                        # Long-only: worst-case dollar loss if the stop hits.
+                        _risk = max(0.0, (price - _stop) * _qty) if _stop > 0 else 0.0
+                        _worst_eq = _live - _risk
+                        _floor    = float(_fs.floor_value or 0)
+                        if _live > 0 and _worst_eq < _floor:
+                            logger.warning(
+                                f"🔒 Floor gate BLOCK {symbol}: "
+                                f"equity ${_live:.2f}, stop-risk ${_risk:.2f}, "
+                                f"worst-case ${_worst_eq:.2f} < floor ${_floor:.2f} "
+                                f"(qty={_qty} entry=${price:.2f} stop=${_stop:.2f})"
+                            )
+                            return
+            except Exception as _fg_e:
+                # Never let a protection-check error block trading silently —
+                # log loudly so we can tell if the gate is actually running.
+                logger.warning(f"floor gate check failed for {symbol}: {_fg_e}")
+
         # ── Pre-flight buying power check — skip if insufficient cash ─────────
         # ── Pre-flight buying power check — skip if Alpaca will reject ──────────
         try:

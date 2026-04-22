@@ -506,11 +506,24 @@ class BotLoop:
         transient errors — never takes down the scan loop.
         """
         from database.database  import SessionLocal
-        from services           import protection_service, ladder_service
+        from services           import protection_service, ladder_service, daily_pnl_service
 
         user_id = self.user_id or 1  # per-user; fallback to 1 only for legacy system bot
         try:
             with SessionLocal() as db:
+                # 1-pre) Snapshot + ratchet — MUST run in the bot tick itself,
+                #        not only when the UI polls /dashboard/today. Previously
+                #        the floor only ratcheted up when the user's browser
+                #        happened to fetch the endpoint, so a closed winner
+                #        at 11:30 wouldn't raise the floor until the next poll
+                #        (or never, if the user wasn't watching). Now every
+                #        15s protection tick re-computes compound realized
+                #        and lifts the floor to its new milestone.
+                try:
+                    daily_pnl_service.snapshot_today(db, user_id, broker=self.broker)
+                except Exception as _sn_e:
+                    logger.warning(f"snapshot/ratchet in protection tick: {_sn_e}")
+
                 # 1a) Ladder tick — per-position peak tracking, trail exits,
                 #     partial scale-outs. Runs FIRST because it's more
                 #     granular than harvest (trails fire before +8% threshold
