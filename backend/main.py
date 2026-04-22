@@ -785,9 +785,9 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
         _crypto_running  = False
         _hybrid_engine   = None
         settings.set_engine_settings(
-            settings._data.get("stop_new_trades_hour", 15),
-            settings._data.get("stop_new_trades_minute", 30),
-            settings._data.get("max_open_positions", 3),
+            int(user.stop_new_trades_hour or 15),
+            int(user.stop_new_trades_minute or 30),
+            int(user.max_open_positions or 3),
             "stocks_only", body.crypto_alloc,
         )
         return {"status": "stocks_only_active", "crypto_running": False,
@@ -818,7 +818,7 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
 
         # Step 2: Build HybridEngine
         t2 = _t.time()
-        _crypto_strategy = settings.all().get("crypto_strategy", "scalp")
+        _crypto_strategy = user.crypto_strategy or "scalp"
         _hybrid_engine = HybridEngine(
             broker           = broker,
             settings         = settings,
@@ -899,9 +899,9 @@ async def set_engine_mode(body: EngineModeBody, user: User = Depends(get_current
 
         # Step 5: Save settings
         settings.set_engine_settings(
-            settings._data.get("stop_new_trades_hour", 15),
-            settings._data.get("stop_new_trades_minute", 30),
-            settings._data.get("max_open_positions", 3),
+            int(user.stop_new_trades_hour or 15),
+            int(user.stop_new_trades_minute or 30),
+            int(user.max_open_positions or 3),
             body.mode,
             body.crypto_alloc,
         )
