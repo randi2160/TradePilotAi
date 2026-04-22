@@ -2025,7 +2025,7 @@ async def get_daily_optimizer(user: User = Depends(get_current_user), db: Sessio
 async def run_daily_scan(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Run AI market scan and generate fresh recommendations for today."""
     try:
-        scan_results = await mkt_scanner.scan()
+        scan_data = await mkt_scanner.scan()
         # Clear old recs for today
         db.query(AIRecommendation).filter(
             AIRecommendation.user_id == user.id,
@@ -2034,21 +2034,28 @@ async def run_daily_scan(user: User = Depends(get_current_user), db: Session = D
         ).delete()
         db.commit()
 
-        # Take top scored results as recommendations
-        top = sorted(scan_results, key=lambda x: x.get("score", 0), reverse=True)[:5]
+        # scan_data is {"gainers": [...], "losers": [...], ...}
+        # Use top gainers as recommendations — they have change_pct, price, volume
+        gainers = scan_data.get("gainers", [])
+        top = gainers[:5]
         for i, item in enumerate(top, 1):
+            price   = float(item.get("price", 0))
+            chg_pct = float(item.get("change_pct", 0))
+            # Derive simple entry/stop/target from price and momentum
+            signal  = "BUY" if chg_pct > 0 else "SELL"
+            conf    = min(95, max(30, int(50 + chg_pct * 3)))  # map % change → confidence
             rec = AIRecommendation(
                 user_id=user.id,
                 symbol=item.get("symbol", ""),
                 rank=i,
-                signal=item.get("signal", "HOLD"),
-                confidence=int(item.get("confidence", 50)),
-                score=float(item.get("score", 0)),
-                entry=float(item.get("entry", 0) or 0),
-                exit_target=float(item.get("exit_target", 0) or 0),
-                stop=float(item.get("stop", 0) or 0),
-                risk_reward=float(item.get("risk_reward", 0) or 0),
-                reasoning=item.get("reasoning", f"Top {i} by market scan score"),
+                signal=signal,
+                confidence=conf,
+                score=round(chg_pct, 2),
+                entry=price,
+                exit_target=round(price * (1 + abs(chg_pct) / 100), 2) if chg_pct > 0 else round(price * (1 - abs(chg_pct) / 100), 2),
+                stop=round(price * 0.98, 2),
+                risk_reward=round(abs(chg_pct) / 2, 2) if chg_pct != 0 else 0,
+                reasoning=f"Top {i} gainer: +{chg_pct:.1f}% today, vol {item.get('volume', 0):,}",
                 source="scanner",
                 trade_date=_today(),
                 status="pending",
