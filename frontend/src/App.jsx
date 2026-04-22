@@ -403,11 +403,24 @@ function TradingApp() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
           onClick={e => e.target === e.currentTarget && setActiveSymbol(null)}>
           <div className="w-full max-w-2xl h-[85vh] flex flex-col">
-            <SymbolPage
-              symbol={activeSymbol}
-              currentUserId={user?.id}
-              onClose={() => setActiveSymbol(null)}
-            />
+            {/* Suspense boundary is REQUIRED here — SymbolPage is a lazy
+                component and the overlay is rendered outside the <main>
+                Suspense. Without this, the first click in production (where
+                the chunk hasn't been fetched yet) suspends against no boundary
+                and throws React error #426 ("component suspended while
+                responding to synchronous input"). It works in local dev only
+                because Vite's module graph pre-warms lazy chunks. */}
+            <Suspense fallback={
+              <div className="flex-1 flex items-center justify-center bg-dark-800 rounded-2xl border border-dark-600">
+                <div className="animate-spin w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full"/>
+              </div>
+            }>
+              <SymbolPage
+                symbol={activeSymbol}
+                currentUserId={user?.id}
+                onClose={() => setActiveSymbol(null)}
+              />
+            </Suspense>
           </div>
         </div>
       )}

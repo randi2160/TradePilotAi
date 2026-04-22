@@ -9,11 +9,13 @@ const SECTIONS = [
   { key: 'losers',   label: '📉 TOP LOSERS',   color: 'text-red-400'   },
 ]
 
-function TickerItem({ symbol, data, isNew, onClick }) {
+function TickerItem({ symbol, data, isNew, onClick, onHover, onLeave }) {
   const up = (data.change_pct ?? 0) >= 0
   return (
     <span
       onClick={onClick}
+      onMouseEnter={onHover}
+      onMouseLeave={onLeave}
       className={`inline-flex items-center gap-1.5 px-3 border-r border-dark-600 whitespace-nowrap cursor-pointer hover:bg-dark-700/50 transition-colors ${isNew ? 'bg-brand-500/20' : ''}`}
     >
       <span className="font-black text-white text-xs">{symbol}</span>
@@ -47,11 +49,14 @@ export default function LiveTicker({ watchlist = [] }) {
   const [actives,   setActives]   = useState([])
   const [newSyms,   setNewSyms]   = useState([])
   const [popup,     setPopup]     = useState(null)
-  const scrollRef = useRef(null)
-  const posRef    = useRef(0)
-  const animRef   = useRef(null)
-  const pausedRef = useRef(false)
-  const prevWL    = useRef([])
+  const scrollRef     = useRef(null)
+  const posRef        = useRef(0)
+  const animRef       = useRef(null)
+  const pausedRef     = useRef(false)
+  const prevWL        = useRef([])
+  // Debounce hover so a quick pass across the scrolling bar doesn't spam the
+  // popup. Cleared on mouse-leave / click / unmount.
+  const hoverTimerRef = useRef(null)
 
   // Detect newly added symbols
   useEffect(() => {
@@ -149,7 +154,31 @@ export default function LiveTicker({ watchlist = [] }) {
 
   function handleClick(e, sym) {
     e.stopPropagation()
+    // Clear any pending hover-popup timer so it doesn't pop up after the
+    // full-page overlay opens.
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = null
+    }
+    setPopup(null)
     window.dispatchEvent(new CustomEvent('openSymbol', { detail: sym }))
+  }
+
+  function handleHover(e, sym) {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = rect.left
+    const y = rect.bottom
+    hoverTimerRef.current = setTimeout(() => {
+      setPopup({ symbol: sym, x, y })
+    }, 350)
+  }
+
+  function handleLeave() {
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = null
+    }
   }
 
   if (items.length === 0) return null
@@ -178,6 +207,8 @@ export default function LiveTicker({ watchlist = [] }) {
                   data={item.data}
                   isNew={newSyms.includes(item.sym)}
                   onClick={e => handleClick(e, item.sym)}
+                  onHover={e => handleHover(e, item.sym)}
+                  onLeave={handleLeave}
                 />
           ))}
         </div>

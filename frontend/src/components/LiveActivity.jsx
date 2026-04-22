@@ -97,8 +97,11 @@ export default function LiveActivity({ signals = [], positions = [], data }) {
       if (r.data?.length > 0) {
         setEvents(prev => {
           // Merge backend events with local ones, dedupe by timestamp+msg
+          // Include the poll timestamp in the id so successive polls don't
+          // collide on `be-0`, `be-1`, ... (React warns about duplicate keys).
+          const pollTs = Date.now()
           const backendEvts = r.data.map((e, i) => ({
-            id:     `be-${i}`,
+            id:     `be-${pollTs}-${i}`,
             type:   e.type ?? 'info',
             msg:    e.msg,
             detail: e.detail ? Object.entries(e.detail).slice(0,4).map(([k,v])=>`${k}: ${v}`).join(' · ') : '',

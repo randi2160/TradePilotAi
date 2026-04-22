@@ -153,10 +153,22 @@ function AIStrategy({ symbol, price }) {
     } finally { setLoading(false) }
   }, [symbol, price])
 
+  // AI cost control: do NOT auto-run on mount — /ai/symbol-sentiment calls
+  // OpenAI and every firing costs money. The user presses "Run AI Analysis"
+  // to kick off the first call. Once they have, re-poll every 60s so the
+  // signal stays fresh while they're looking at the modal.
+  //
+  // Use a ref for `analyze` so the interval always calls the latest version
+  // without being re-armed every time `price` refreshes (which would reset
+  // the 60s timer and prevent it from ever firing).
+  const analyzeRef = useRef(analyze)
+  useEffect(() => { analyzeRef.current = analyze }, [analyze])
+  const hasRun = !!data
   useEffect(() => {
-    const iv = setInterval(analyze, 60000)
+    if (!hasRun) return
+    const iv = setInterval(() => analyzeRef.current(), 60000)
     return () => clearInterval(iv)
-  }, [symbol])
+  }, [hasRun])
 
   const SIG = {
     BUY:  'bg-green-900/30 border-green-600 text-green-400',
@@ -563,10 +575,18 @@ export default function SymbolPage({ symbol, onClose, currentUserId }) {
                   {isUp ? '+' : ''}{change.toFixed(2)}%
                 </span>
               )}
-              {price?.volume && (
-                <span className="text-xs text-gray-500">Vol: {(price.volume / 1e6).toFixed(1)}M</span>
-              )}
             </div>
+            {/* Quick-snapshot line — Vol · High · Low — matches the hover
+                popup so the user sees the same at-a-glance data whether they
+                hovered or clicked. No extra API calls; comes from the same
+                /ticker/{symbol} payload we already fetched. */}
+            {price?.volume > 0 && (
+              <div className="text-xs text-gray-500 mt-0.5">
+                Vol: {price.volume > 1e6 ? `${(price.volume/1e6).toFixed(1)}M` : `${(price.volume/1e3).toFixed(0)}K`}
+                {price.high != null && <> {' · '} H ${price.high.toFixed(2)}</>}
+                {price.low  != null && <> {' · '} L ${price.low.toFixed(2)}</>}
+              </div>
+            )}
           </div>
 
           <button onClick={watchlist} disabled={inWatch}
