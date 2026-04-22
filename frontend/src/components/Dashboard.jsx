@@ -133,9 +133,27 @@ function LiveEngineStatus({ data, engineStatus, dualSummary, todayStats }) {
   const savedMode     = engineStatus?.mode || 'stocks_only'
 
   const now       = new Date()
-  const isWeekend = now.getDay() === 0 || now.getDay() === 6
-  const etHour    = (now.getUTCHours() - 5 + 24) % 24
-  const marketOpen= !isWeekend && etHour >= 9 && etHour < 16
+  // Use the runtime's own IANA tz database (via Intl) so this follows DST
+  // automatically. The old `(UTC - 5 + 24) % 24` hardcoded EST year-round,
+  // which meant during EDT (March–Nov) the UI would falsely show "After
+  // Hours" / "Waiting for open" for the first 30 minutes after the real
+  // open (9:30–10:00 AM EDT).
+  const etParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour:    '2-digit',
+    minute:  '2-digit',
+    weekday: 'short',
+    hour12:  false,
+  }).formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc }, {})
+  const etHour    = parseInt(etParts.hour,   10)   // 0–23 in ET, DST-aware
+  const etMinute  = parseInt(etParts.minute, 10)
+  const isWeekend = etParts.weekday === 'Sat' || etParts.weekday === 'Sun'
+  // NYSE regular hours: 9:30 AM – 4:00 PM ET. Pre/post-market are excluded
+  // from "market open" — the bot only trades regular hours.
+  const etMinutesSinceMidnight = etHour * 60 + etMinute
+  const marketOpen = !isWeekend
+    && etMinutesSinceMidnight >= 9 * 60 + 30   // 9:30 AM
+    && etMinutesSinceMidnight <  16 * 60       // 4:00 PM
 
   const CRYPTO_LABEL = {
     idle: 'Waiting to scan', scanning: 'Scanning markets…',
