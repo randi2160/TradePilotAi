@@ -17,6 +17,30 @@ function goTo(tab) {
   window.dispatchEvent(new CustomEvent('navigate', { detail: tab }))
 }
 
+// ET time formatter — built ONCE at module load, reused on every render.
+// Constructing Intl.DateTimeFormat is surprisingly expensive (tz-db parse,
+// locale init, etc.), and LiveEngineStatus re-renders on every WebSocket
+// tick. Hoisting here keeps the DST-aware logic without the per-render cost.
+const ET_TIME_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  hour:     '2-digit',
+  minute:   '2-digit',
+  weekday:  'short',
+  hour12:   false,
+})
+function getEtNow(date) {
+  // formatToParts → {hour, minute, weekday}. We only call this hot path for
+  // the market-hours badge; the return shape is tiny.
+  const parts = ET_TIME_FORMATTER.formatToParts(date)
+  let h = 0, m = 0, w = ''
+  for (const p of parts) {
+    if (p.type === 'hour')    h = parseInt(p.value, 10)
+    else if (p.type === 'minute') m = parseInt(p.value, 10)
+    else if (p.type === 'weekday') w = p.value
+  }
+  return { hour: h, minute: m, weekday: w }
+}
+
 // ── Stat Card ─────────────────────────────────────────────────────────────────
 // `tab` prop (optional) turns the card into a button that navigates to a tab.
 function StatCard({ icon: Icon, label, value, sub, color, bg, tab }) {
@@ -132,28 +156,12 @@ function LiveEngineStatus({ data, engineStatus, dualSummary, todayStats }) {
   const cryptoState   = engineStatus?.crypto?.state || 'idle'
   const savedMode     = engineStatus?.mode || 'stocks_only'
 
-  const now       = new Date()
-  // Use the runtime's own IANA tz database (via Intl) so this follows DST
-  // automatically. The old `(UTC - 5 + 24) % 24` hardcoded EST year-round,
-  // which meant during EDT (March–Nov) the UI would falsely show "After
-  // Hours" / "Waiting for open" for the first 30 minutes after the real
-  // open (9:30–10:00 AM EDT).
-  const etParts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    hour:    '2-digit',
-    minute:  '2-digit',
-    weekday: 'short',
-    hour12:  false,
-  }).formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc }, {})
-  const etHour    = parseInt(etParts.hour,   10)   // 0–23 in ET, DST-aware
-  const etMinute  = parseInt(etParts.minute, 10)
-  const isWeekend = etParts.weekday === 'Sat' || etParts.weekday === 'Sun'
-  // NYSE regular hours: 9:30 AM – 4:00 PM ET. Pre/post-market are excluded
-  // from "market open" — the bot only trades regular hours.
-  const etMinutesSinceMidnight = etHour * 60 + etMinute
-  const marketOpen = !isWeekend
-    && etMinutesSinceMidnight >= 9 * 60 + 30   // 9:30 AM
-    && etMinutesSinceMidnight <  16 * 60       // 4:00 PM
+  // DST-aware ET check via the module-scoped formatter. NYSE regular
+  // hours: 9:30 AM – 4:00 PM ET. Bot only trades regular hours.
+  const { hour: etHour, minute: etMinute, weekday: etWeekday } = getEtNow(new Date())
+  const isWeekend   = etWeekday === 'Sat' || etWeekday === 'Sun'
+  const etMinutes   = etHour * 60 + etMinute
+  const marketOpen  = !isWeekend && etMinutes >= 9 * 60 + 30 && etMinutes < 16 * 60
 
   const CRYPTO_LABEL = {
     idle: 'Waiting to scan', scanning: 'Scanning markets…',
