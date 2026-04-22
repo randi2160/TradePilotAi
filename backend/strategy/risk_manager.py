@@ -30,10 +30,17 @@ class DynamicRiskManager:
         target_min: float,
         target_max: float,
         open_positions: int = 0,
+        recovery_mode: bool = False,
+        recovery_size_mult: float = 1.0,
+        recovery_stop_mult: float = 1.0,
     ) -> dict:
         """
         Returns qty, stop_loss, take_profit, risk_pct.
         Returns qty=0 when risk conditions block the trade.
+
+        `recovery_mode` is True when live equity is below the sacred base.
+        In that state the caller passes multipliers (<1.0 shrinks size /
+        tightens stops) so we don't dig the hole deeper while climbing back.
         """
         # ── Kill-switch: daily loss exceeded ─────────────────────────────────
         if current_pnl <= -self.daily_loss_lim:
@@ -64,6 +71,22 @@ class DynamicRiskManager:
             stop_dist = atr * self.atr_stop_mult
         else:
             stop_dist = price * 0.012         # fallback: 1.2 %
+
+        # ── Recovery-mode tightening ──────────────────────────────────────────
+        # Equity is below the sacred base; shrink size and tighten stops so
+        # losses on any single trade are capped while we climb back. Applied
+        # AFTER base calc so the user's configured multipliers act on the final
+        # dollar risk, not just a fraction of it.
+        if recovery_mode:
+            sz_mult   = max(0.05, min(1.5, float(recovery_size_mult or 1.0)))
+            stop_mult = max(0.25, min(2.0, float(recovery_stop_mult or 1.0)))
+            risk_dollars = risk_dollars * sz_mult
+            stop_dist    = stop_dist    * stop_mult
+            risk_pct     = risk_pct     * sz_mult
+            logger.info(
+                f"🔧 Recovery sizing {symbol}: size×{sz_mult:.2f}, stop×{stop_mult:.2f} "
+                f"→ risk=${risk_dollars:.2f}, stop_dist=${stop_dist:.4f}"
+            )
 
         # Shares = risk_dollars / stop_distance
         raw_shares = risk_dollars / stop_dist

@@ -46,12 +46,23 @@ TRADE_LADDER_COLUMNS = [
 ]
 
 PROTECTION_LADDER_COLUMNS = [
-    ("ladder_enabled",       "BOOLEAN",                   "INTEGER",                   "TRUE"),
-    ("scaleout_enabled",     "BOOLEAN",                   "INTEGER",                   "TRUE"),
-    ("scaleout_milestones",  "JSONB",                     "JSON",                      "'[0.05, 0.10, 0.15]'"),
-    ("scaleout_fraction",    "DOUBLE PRECISION",          "REAL",                      "0.25"),
-    ("concentration_pct",    "DOUBLE PRECISION",          "REAL",                      "0.30"),
-    ("time_decay_hours",     "DOUBLE PRECISION",          "REAL",                      "4.0"),
+    ("ladder_enabled",             "BOOLEAN",          "INTEGER",  "TRUE"),
+    ("scaleout_enabled",           "BOOLEAN",          "INTEGER",  "TRUE"),
+    ("scaleout_milestones",        "JSONB",            "JSON",     "'[0.05, 0.10, 0.15]'"),
+    ("scaleout_fraction",          "DOUBLE PRECISION", "REAL",     "0.25"),
+    ("concentration_pct",          "DOUBLE PRECISION", "REAL",     "0.30"),
+    ("time_decay_hours",           "DOUBLE PRECISION", "REAL",     "4.0"),
+    # ── Intra-milestone trailing harvest + recovery mode ────────────────────
+    # Added in the gain-preservation upgrade: floor protection now also
+    # captures partial progress between milestones, and the bot runs in a
+    # special recovery mode when equity dips below the sacred base.
+    ("intra_lock_pct",             "DOUBLE PRECISION", "REAL",     "0.30"),
+    ("min_intra_gain",             "DOUBLE PRECISION", "REAL",     "15.0"),
+    ("peak_equity_since_ratchet",  "DOUBLE PRECISION", "REAL",     None),
+    ("recovery_size_mult",         "DOUBLE PRECISION", "REAL",     "0.60"),
+    ("recovery_stop_mult",         "DOUBLE PRECISION", "REAL",     "0.75"),
+    ("recovery_conf_boost",        "DOUBLE PRECISION", "REAL",     "0.05"),
+    ("recovery_budget",            "DOUBLE PRECISION", "REAL",     "20.0"),
 ]
 
 

@@ -55,6 +55,12 @@ class BotLoop:
         self._unrealized_pause_until: float = 0.0  # timestamp
         # HARD breach flag — once set, NO trading until manually restarted
         self._floor_breached: bool = False
+        # Intra-milestone trigger needs 2 consecutive sub-trigger ticks before
+        # firing, so a single noisy print doesn't dump all positions.
+        self._intra_below_count: int = 0
+        # Recovery mode — equity below the sacred base. Surfaced to the engine
+        # so new entries use tighter sizing/stops/confidence.
+        self._recovery_mode: bool = False
 
     # ── Control ───────────────────────────────────────────────────────────────
 
@@ -106,13 +112,20 @@ class BotLoop:
                             _acct = _tmp_broker.get_account()
                             _eq = float(_acct.get("equity", 0))
                             _floor = float(settings.floor_value or 0)
+                            _base  = float(settings.initial_capital or 0)
                             if _eq > 0 and _eq < _floor:
-                                new_floor = _eq * 0.99
+                                # Floor can drop toward the sacred base on restart
+                                # but NEVER below it. Base is permanent foundation.
+                                new_floor = max(_base, _eq * 0.99)
                                 logger.warning(
                                     f"bot.start[{uid_tag}] equity ${_eq:.2f} < floor ${_floor:.2f} "
-                                    f"— resetting floor to ${new_floor:.2f}"
+                                    f"— resetting floor to ${new_floor:.2f} "
+                                    f"(clamped to sacred base ${_base:.2f})"
                                 )
                                 settings.floor_value = new_floor
+                                # Clear the intra-milestone peak too so the next
+                                # climb starts its giveback math from scratch.
+                                settings.peak_equity_since_ratchet = None
                                 _breach_db.commit()
                             else:
                                 logger.info(
@@ -587,10 +600,9 @@ class BotLoop:
                 except Exception as e:
                     logger.warning(f"unrealized drawdown guard: {e}")
 
-                # 2) Snapshot + ratchet runs on the daily_pnl_service flow
-                #    (called from main.py snapshot endpoints and finalize_day).
-                #    Here we just read the current floor + live equity and see
-                #    if we've breached.
+                # 2) Snapshot + ratchet + recovery detection + intra-harvest +
+                #    breach check — all done here in the bot tick so UI polling
+                #    isn't required for protection to work.
                 live_equity = 0.0
                 try:
                     acct = self.broker.get_account() or {}
@@ -599,6 +611,70 @@ class BotLoop:
                     live_equity = 0.0
 
                 if live_equity > 0:
+                    # 2a) Update the intra-milestone peak tracker — separate
+                    # from peak_compound which tracks realized only.
+                    try:
+                        protection_service.update_peak_equity(db, user_id, live_equity)
+                    except Exception as e:
+                        logger.warning(f"update_peak_equity: {e}")
+
+                    # 2b) Refresh recovery mode flag for the engine. Transition
+                    # logs help diagnose why sizing suddenly tightened.
+                    settings_now = protection_service.get_or_create(db, user_id)
+                    new_recovery = protection_service.is_in_recovery_mode(settings_now, live_equity)
+                    if new_recovery != self._recovery_mode:
+                        if new_recovery:
+                            logger.warning(
+                                f"🔧 RECOVERY MODE ON — equity ${live_equity:.2f} < "
+                                f"base ${float(settings_now.initial_capital or 0):.2f}. "
+                                f"Bot will trade with tighter risk until equity climbs back."
+                            )
+                        else:
+                            logger.warning(
+                                f"✅ RECOVERY MODE OFF — equity ${live_equity:.2f} "
+                                f">= base ${float(settings_now.initial_capital or 0):.2f}. "
+                                f"Resuming normal risk profile."
+                            )
+                        self._recovery_mode = new_recovery
+
+                    # 2c) Intra-milestone trailing harvest. Trigger requires the
+                    # equity to be below the dynamic trigger for TWO consecutive
+                    # ticks — one sub-trigger print could just be noise.
+                    try:
+                        ih = protection_service.should_intra_harvest(settings_now, live_equity)
+                        if ih.get("armed") and ih.get("triggered"):
+                            self._intra_below_count += 1
+                            logger.info(
+                                f"🌀 Intra-trigger armed — equity ${live_equity:.2f} < "
+                                f"trigger ${ih.get('trigger', 0):.2f} "
+                                f"(peak ${ih.get('peak', 0):.2f}, floor ${ih.get('floor', 0):.2f}) "
+                                f"— {self._intra_below_count}/2 consecutive"
+                            )
+                            if self._intra_below_count >= 2:
+                                logger.warning(
+                                    f"🌾 INTRA-HARVEST FIRE — locking gains before they slip. "
+                                    f"gain_above_floor=${ih.get('gain_above_floor', 0):.2f}"
+                                )
+                                protection_service.run_intra_harvest(db, user_id, self.broker)
+                                # Immediately snapshot + ratchet so the floor
+                                # lifts on the freshly-realized gains, then
+                                # peak_equity_since_ratchet resets inside ratchet_floor.
+                                try:
+                                    daily_pnl_service.snapshot_today(db, user_id, broker=self.broker)
+                                except Exception as e:
+                                    logger.warning(f"post-harvest snapshot: {e}")
+                                self._intra_below_count = 0
+                        else:
+                            # Reset counter if we bounce back above the trigger
+                            if self._intra_below_count > 0:
+                                logger.debug(
+                                    f"🌀 Intra-trigger cleared — resetting counter from "
+                                    f"{self._intra_below_count}"
+                                )
+                            self._intra_below_count = 0
+                    except Exception as e:
+                        logger.warning(f"intra-harvest check: {e}")
+
                     breach = protection_service.check_breach(db, user_id, live_equity)
                     if breach.get("breached"):
                         logger.warning(

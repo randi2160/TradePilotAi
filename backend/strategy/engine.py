@@ -172,6 +172,52 @@ class StrategyEngine:
         price = signal["price"]
         atr   = signal.get("atr", 0)
 
+        # ── Read protection settings up-front ─────────────────────────────────
+        # Two things we need from them: (a) recovery-mode flag + multipliers
+        # for risk sizing, (b) recovery_budget for the pre-trade floor gate.
+        # One query, reused below — avoids two round-trips on every entry.
+        _recovery_mode     = False
+        _rec_size_mult     = 1.0
+        _rec_stop_mult     = 1.0
+        _rec_conf_boost    = 0.0
+        _rec_budget        = 0.0
+        _protection_ready  = False
+        _live_equity       = 0.0
+        _settings_snapshot = None
+        if self.user_id:
+            try:
+                from database.database import SessionLocal as _PSL
+                from services          import protection_service as _prot_svc
+                with _PSL() as _pdb:
+                    _s = _prot_svc.get_or_create(_pdb, self.user_id)
+                    if _s.enabled:
+                        _acct = self.broker.get_account() or {}
+                        _live_equity = float(_acct.get("equity", 0) or 0)
+                        _recovery_mode  = _prot_svc.is_in_recovery_mode(_s, _live_equity)
+                        _rec_size_mult  = float(_s.recovery_size_mult  or 0.60)
+                        _rec_stop_mult  = float(_s.recovery_stop_mult  or 0.75)
+                        _rec_conf_boost = float(_s.recovery_conf_boost or 0.05)
+                        _rec_budget     = float(_s.recovery_budget     or 20.0)
+                        _settings_snapshot = {
+                            "floor_value":     float(_s.floor_value     or 0.0),
+                            "initial_capital": float(_s.initial_capital or 0.0),
+                        }
+                        _protection_ready = True
+            except Exception as _ps_e:
+                logger.warning(f"protection snapshot for {symbol}: {_ps_e}")
+
+        # Recovery mode requires an extra bump over the ensemble's threshold —
+        # the trade needs to be that much higher quality to justify risking
+        # capital when we're already below the base.
+        if _recovery_mode and _rec_conf_boost > 0:
+            if float(signal.get("confidence", 0) or 0) < (config.MIN_CONFIDENCE_SCORE + _rec_conf_boost):
+                logger.info(
+                    f"🔧 Recovery: blocking {symbol} — conf {signal['confidence']:.2f} < "
+                    f"{config.MIN_CONFIDENCE_SCORE + _rec_conf_boost:.2f} "
+                    f"(base {config.MIN_CONFIDENCE_SCORE:.2f} + boost {_rec_conf_boost:.2f})"
+                )
+                return
+
         sizing = self.risk.size_position(
             symbol       = symbol,
             price        = price,
@@ -181,6 +227,9 @@ class StrategyEngine:
             target_min   = self.tracker.target_min,
             target_max   = self.tracker.target_max,
             open_positions = len(self._open),
+            recovery_mode      = _recovery_mode,
+            recovery_size_mult = _rec_size_mult,
+            recovery_stop_mult = _rec_stop_mult,
         )
 
         if sizing["qty"] == 0:
@@ -196,39 +245,42 @@ class StrategyEngine:
             return
 
         # ── Pre-trade floor gate (gain-protection enforcement) ────────────────
-        # The protection service already REACTS to breaches by halting the bot
-        # and closing everything, but until now nothing stopped us from opening
-        # a trade that would CAUSE the breach. Compute worst-case loss against
-        # the position's stop-loss; if that drops live equity below the user's
-        # locked floor, refuse the entry entirely. Per-user — legacy system bot
-        # (no user_id) retains old behaviour.
-        if self.user_id:
-            try:
-                from database.database import SessionLocal as _FloorSL
-                from services          import protection_service as _prot
-                with _FloorSL() as _fdb:
-                    _fs = _prot.get_or_create(_fdb, self.user_id)
-                    if _fs.enabled and float(_fs.floor_value or 0) > 0:
-                        _acct  = self.broker.get_account() or {}
-                        _live  = float(_acct.get("equity", 0) or 0)
-                        _stop  = float(sizing.get("stop_loss", 0) or 0)
-                        _qty   = int(sizing.get("qty", 0) or 0)
-                        # Long-only: worst-case dollar loss if the stop hits.
-                        _risk = max(0.0, (price - _stop) * _qty) if _stop > 0 else 0.0
-                        _worst_eq = _live - _risk
-                        _floor    = float(_fs.floor_value or 0)
-                        if _live > 0 and _worst_eq < _floor:
-                            logger.warning(
-                                f"🔒 Floor gate BLOCK {symbol}: "
-                                f"equity ${_live:.2f}, stop-risk ${_risk:.2f}, "
-                                f"worst-case ${_worst_eq:.2f} < floor ${_floor:.2f} "
-                                f"(qty={_qty} entry=${price:.2f} stop=${_stop:.2f})"
-                            )
-                            return
-            except Exception as _fg_e:
-                # Never let a protection-check error block trading silently —
-                # log loudly so we can tell if the gate is actually running.
-                logger.warning(f"floor gate check failed for {symbol}: {_fg_e}")
+        # Uses the settings snapshot we already loaded above. Worst-case loss
+        # = (price − stop_loss) × qty for a long.
+        #
+        # Normal mode: refuse the trade if worst-case equity would drop below
+        # the locked floor.
+        #
+        # Recovery mode: comparing against the floor is a lockup — we're
+        # already below it by definition. Instead compare against
+        # (live_equity − recovery_budget): each trade can risk at most
+        # `recovery_budget` dollars of further drawdown. This keeps the bot
+        # trading toward base while capping blast radius per trade.
+        if _protection_ready and _settings_snapshot and _live_equity > 0:
+            _stop = float(sizing.get("stop_loss", 0) or 0)
+            _qty  = int(sizing.get("qty", 0) or 0)
+            _risk = max(0.0, (price - _stop) * _qty) if _stop > 0 else 0.0
+            _worst_eq = _live_equity - _risk
+            _floor    = _settings_snapshot["floor_value"]
+            if _recovery_mode:
+                _limit = _live_equity - _rec_budget
+                if _worst_eq < _limit:
+                    logger.warning(
+                        f"🔧 Recovery gate BLOCK {symbol}: worst-case "
+                        f"${_worst_eq:.2f} < allowed ${_limit:.2f} "
+                        f"(equity ${_live_equity:.2f} − budget ${_rec_budget:.2f}). "
+                        f"stop-risk=${_risk:.2f} qty={_qty}"
+                    )
+                    return
+            else:
+                if _worst_eq < _floor:
+                    logger.warning(
+                        f"🔒 Floor gate BLOCK {symbol}: "
+                        f"equity ${_live_equity:.2f}, stop-risk ${_risk:.2f}, "
+                        f"worst-case ${_worst_eq:.2f} < floor ${_floor:.2f} "
+                        f"(qty={_qty} entry=${price:.2f} stop=${_stop:.2f})"
+                    )
+                    return
 
         # ── Pre-flight buying power check — skip if insufficient cash ─────────
         # ── Pre-flight buying power check — skip if Alpaca will reject ──────────

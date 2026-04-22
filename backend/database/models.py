@@ -231,12 +231,35 @@ class ProtectionSettings(Base):
     # Account floor config
     floor_value           = Column(Float, default=5000.0)  # current locked floor (monotonic)
     initial_capital       = Column(Float, default=5000.0)  # snapshot of base at init — "never below this"
-    milestone_size        = Column(Float, default=50.0)    # raise floor every $50 of compound gain (tighter)
+    milestone_size        = Column(Float, default=10.0)    # raise floor every $10 of compound gain (responsive)
     lock_pct              = Column(Float, default=0.90)    # % of each milestone permanently locked (strict)
 
     # Harvest config
     harvest_position_pct  = Column(Float, default=0.08)    # force-close a position at this unrealized gain
     harvest_portfolio_cap = Column(Float, default=500.0)   # or when total unrealized exceeds this
+
+    # ── Intra-milestone trailing harvest ─────────────────────────────────
+    # Protects partial progress BETWEEN ladder steps. Without this, equity
+    # can climb to +$45 of a +$50 milestone, pull back, and give it all up
+    # before the discrete ratchet ever fires. With this, once equity pulls
+    # back by `intra_lock_pct` of the gain-above-floor (peaked), we force-
+    # close open positions to convert unrealized → realized, and the floor
+    # ratchets based on the now-banked compound total.
+    intra_lock_pct            = Column(Float, default=0.30)  # 30% intra-gain giveback tolerance
+    min_intra_gain            = Column(Float, default=15.0)  # don't arm trigger under $15 of intra-gain (noise floor)
+    peak_equity_since_ratchet = Column(Float, nullable=True) # running peak, resets each ratchet
+
+    # ── Recovery mode — when live equity dips below initial_capital ──────
+    # Instead of halting the bot (classic breach response), we keep trading
+    # but with much tighter risk so we can climb back above base without
+    # bleeding further. The normal breach halt still fires if floor is
+    # above base AND equity falls below floor (i.e. we had locked gains
+    # to protect). Recovery mode ONLY applies when no gains are locked
+    # beyond the sacred base — the worst case is we're below base.
+    recovery_size_mult        = Column(Float, default=0.60)  # position size x0.60 in recovery
+    recovery_stop_mult        = Column(Float, default=0.75)  # stop distance x0.75 (tighter stops)
+    recovery_conf_boost       = Column(Float, default=0.05)  # require min_conf + 0.05 to enter
+    recovery_budget           = Column(Float, default=20.0)  # max $ further drawdown allowed per trade
 
     # Ladder config — per-position trailing + scale-out
     # Tiers are hardcoded in services/ladder_service.LADDER_TIERS. These flags

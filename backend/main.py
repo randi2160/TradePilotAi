@@ -1639,6 +1639,17 @@ async def protection_get_settings(
         "scaleout_fraction":     float(getattr(row, "scaleout_fraction", 0.20) or 0.20),
         "concentration_pct":     float(getattr(row, "concentration_pct", 0.30) or 0.30),
         "time_decay_hours":      float(getattr(row, "time_decay_hours",  4.0)  or 4.0),
+        # Intra-milestone trailing harvest
+        "intra_lock_pct":            float(getattr(row, "intra_lock_pct", 0.30) or 0.30),
+        "min_intra_gain":            float(getattr(row, "min_intra_gain", 15.0) or 15.0),
+        "peak_equity_since_ratchet": (float(row.peak_equity_since_ratchet)
+                                       if getattr(row, "peak_equity_since_ratchet", None) is not None
+                                       else None),
+        # Recovery mode tuning
+        "recovery_size_mult":    float(getattr(row, "recovery_size_mult",  0.60) or 0.60),
+        "recovery_stop_mult":    float(getattr(row, "recovery_stop_mult",  0.75) or 0.75),
+        "recovery_conf_boost":   float(getattr(row, "recovery_conf_boost", 0.05) or 0.05),
+        "recovery_budget":       float(getattr(row, "recovery_budget",     20.0) or 20.0),
     }
 
 

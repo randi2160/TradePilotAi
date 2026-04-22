@@ -116,6 +116,14 @@ def update_settings(db: Session, user_id: int, updates: dict) -> ProtectionSetti
         "scaleout_fraction",
         "concentration_pct",
         "time_decay_hours",
+        # Intra-milestone trailing harvest
+        "intra_lock_pct",
+        "min_intra_gain",
+        # Recovery-mode risk tuning
+        "recovery_size_mult",
+        "recovery_stop_mult",
+        "recovery_conf_boost",
+        "recovery_budget",
     }
     for k, v in (updates or {}).items():
         if k in allowed and v is not None:
@@ -149,6 +157,33 @@ def update_settings(db: Session, user_id: int, updates: dict) -> ProtectionSetti
         row.scaleout_milestones = clean or [0.05, 0.10, 0.15]
     except Exception:
         row.scaleout_milestones = [0.05, 0.10, 0.15]
+
+    # Intra-milestone + recovery clamps. Defensive because these come from a
+    # user-editable form and silly values would make the trigger math weird.
+    try:
+        row.intra_lock_pct = max(0.0, min(0.95, float(row.intra_lock_pct or 0.30)))
+    except Exception:
+        row.intra_lock_pct = 0.30
+    try:
+        row.min_intra_gain = max(1.0, float(row.min_intra_gain or 15.0))
+    except Exception:
+        row.min_intra_gain = 15.0
+    try:
+        row.recovery_size_mult = max(0.05, min(1.5, float(row.recovery_size_mult or 0.60)))
+    except Exception:
+        row.recovery_size_mult = 0.60
+    try:
+        row.recovery_stop_mult = max(0.25, min(2.0, float(row.recovery_stop_mult or 0.75)))
+    except Exception:
+        row.recovery_stop_mult = 0.75
+    try:
+        row.recovery_conf_boost = max(0.0, min(0.50, float(row.recovery_conf_boost or 0.05)))
+    except Exception:
+        row.recovery_conf_boost = 0.05
+    try:
+        row.recovery_budget = max(1.0, float(row.recovery_budget or 20.0))
+    except Exception:
+        row.recovery_budget = 20.0
 
     db.commit()
     db.refresh(row)
@@ -193,6 +228,10 @@ def ratchet_floor(db: Session, user_id: int, compound_total: float) -> dict:
         settings.last_ratchet_at = datetime.utcnow()
         if compound_total > (settings.peak_compound or 0.0):
             settings.peak_compound = compound_total
+        # Reset the intra-milestone peak tracker — a ratchet means we've just
+        # banked gains and the next giveback calculation should start from
+        # the new floor, not the old peak.
+        settings.peak_equity_since_ratchet = None
         db.commit()
         db.refresh(settings)
         logger.info(
@@ -211,18 +250,171 @@ def ratchet_floor(db: Session, user_id: int, compound_total: float) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Intra-milestone trailing harvest — protect partial progress
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def update_peak_equity(db: Session, user_id: int, live_equity: float) -> float:
+    """Track the highest equity seen since the last floor ratchet. Called every
+    protection tick. Returns the (possibly updated) peak."""
+    if live_equity is None or live_equity <= 0:
+        return 0.0
+    settings = get_or_create(db, user_id)
+    cur_peak = float(settings.peak_equity_since_ratchet or 0.0)
+    # Seed peak on first read — use the greater of live equity and current floor
+    # so the initial trigger calculation can't ever bank negative "progress".
+    if cur_peak <= 0:
+        seed = max(float(live_equity), float(settings.floor_value or 0.0))
+        settings.peak_equity_since_ratchet = seed
+        db.commit()
+        return seed
+    if float(live_equity) > cur_peak:
+        settings.peak_equity_since_ratchet = float(live_equity)
+        db.commit()
+        return float(live_equity)
+    return cur_peak
+
+
+def compute_dynamic_trigger(settings: ProtectionSettings) -> Optional[float]:
+    """Pure function: the equity level at which we harvest to lock intra-gains.
+
+        trigger = peak − (peak − floor) × intra_lock_pct
+
+    Returns None when there's no meaningful peak above floor yet (don't arm)."""
+    peak  = float(settings.peak_equity_since_ratchet or 0.0)
+    floor = float(settings.floor_value or 0.0)
+    gain_above_floor = peak - floor
+    min_gain = float(settings.min_intra_gain or 0.0)
+    if gain_above_floor <= min_gain:
+        return None
+    giveback_pct = max(0.0, min(1.0, float(settings.intra_lock_pct or 0.0)))
+    return peak - gain_above_floor * giveback_pct
+
+
+def should_intra_harvest(settings: ProtectionSettings, live_equity: float) -> dict:
+    """Check whether live_equity has fallen below the dynamic trigger, meaning
+    we should book unrealized gains now before they evaporate back to the
+    ratcheted floor. Returns {armed, triggered, trigger, peak, gain_above_floor}."""
+    if not settings.enabled:
+        return {"armed": False, "triggered": False}
+    trigger = compute_dynamic_trigger(settings)
+    peak    = float(settings.peak_equity_since_ratchet or 0.0)
+    floor   = float(settings.floor_value or 0.0)
+    if trigger is None:
+        return {
+            "armed":     False,
+            "triggered": False,
+            "peak":      peak,
+            "floor":     floor,
+            "gain_above_floor": peak - floor,
+        }
+    triggered = float(live_equity or 0.0) < trigger
+    return {
+        "armed":     True,
+        "triggered": triggered,
+        "trigger":   trigger,
+        "peak":      peak,
+        "floor":     floor,
+        "live":      float(live_equity or 0.0),
+        "gain_above_floor": peak - floor,
+    }
+
+
+def run_intra_harvest(db: Session, user_id: int, broker) -> dict:
+    """Close ALL open stock positions to realize whatever gains exist. Called
+    once the should_intra_harvest trigger has fired (after the bot_loop's 2-tick
+    confirmation to filter noise). Returns a summary dict."""
+    if broker is None:
+        return {"closed": [], "error": "no_broker"}
+
+    closed: list[str] = []
+    errs:   list[str] = []
+    try:
+        positions = broker.get_positions() or []
+    except Exception as e:
+        return {"closed": [], "error": f"get_positions failed: {e}"}
+
+    for p in positions:
+        sym = p.get("symbol") or p.get("asset_id")
+        if not sym:
+            continue
+        # Skip crypto here — ladder/harvest handle those separately. We only
+        # intra-harvest stock positions because their day-session drift is
+        # what the intra-milestone trigger is designed to catch.
+        cls = (p.get("asset_class") or "").lower()
+        if cls in ("crypto", "cryptocurrency"):
+            continue
+        try:
+            broker.close_position(sym)
+            closed.append(sym)
+        except Exception as e:
+            errs.append(f"{sym}: {e}")
+
+    settings = get_or_create(db, user_id)
+    settings.last_harvest_at = datetime.utcnow()
+    db.commit()
+
+    logger.warning(
+        f"🌾 INTRA-HARVEST for user {user_id}: "
+        f"closed {len(closed)} position(s) "
+        f"{('errs=' + str(errs)) if errs else ''}"
+    )
+    return {"closed": closed, "errors": errs}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Recovery mode — equity below sacred base
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def is_in_recovery_mode(settings: ProtectionSettings, live_equity: float) -> bool:
+    """Recovery mode is strictly: equity < initial_capital (the sacred base).
+
+    Used in two places:
+      1) bot_loop breach handler — skip the hard halt so we can climb back.
+      2) engine._enter / risk_manager — tighter sizing, stops, confidence.
+
+    Note we do NOT enter recovery just because equity < floor — that's a
+    real breach (floor is above base means locked gains are being given back,
+    which deserves the halt). Recovery is only when we're below the sacred
+    foundation entirely.
+    """
+    if not settings.enabled:
+        return False
+    base = float(settings.initial_capital or 0.0)
+    live = float(live_equity or 0.0)
+    return live > 0 and live < base
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Breach detection + response
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def check_breach(db: Session, user_id: int, live_equity: float) -> dict:
     """Compare live equity to the locked floor. If below, return breach details
-    so the caller can decide what to do (halt, close, alert)."""
+    so the caller can decide what to do (halt, close, alert).
+
+    Recovery-mode carve-out: if equity is below the sacred base AND no gains
+    are locked above base (floor == initial_capital), we do NOT flag a breach.
+    That state is "recovery mode" — bot keeps trading with tighter risk so it
+    can climb back above base. Halting would guarantee we never recover.
+    """
     settings = get_or_create(db, user_id)
     if not settings.enabled:
         return {"breached": False, "reason": "protection_disabled"}
 
     floor = float(settings.floor_value or 0.0)
+    base  = float(settings.initial_capital or 0.0)
     live  = float(live_equity or 0.0)
+
+    # Recovery carve-out — no locked gains above base, equity below base.
+    if live > 0 and live < base and floor <= base + 0.01:
+        return {
+            "breached":      False,
+            "recovery_mode": True,
+            "floor_value":   floor,
+            "base":          base,
+            "live_equity":   live,
+            "shortfall":     base - live,
+        }
 
     if live < floor:
         # Only record a *new* breach if we haven't recently — prevents spam

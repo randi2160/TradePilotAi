@@ -71,6 +71,16 @@ export default function ProtectionSettings() {
   const [timeDecayHours,  setTimeDecayHours]  = useState(4)
   const [milestonesStr,   setMilestonesStr]   = useState('5, 10, 15') // editable % CSV
 
+  // Intra-milestone trailing harvest — protects partial gains between ladder steps
+  const [intraLockPct,    setIntraLockPct]    = useState(30)      // % of intra-gain give-back, stored as %
+  const [minIntraGain,    setMinIntraGain]    = useState(15)      // $ floor below which trigger doesn't arm
+
+  // Recovery mode — tighter risk when equity < base
+  const [recSizeMult,     setRecSizeMult]     = useState(60)      // % of normal size, stored as %
+  const [recStopMult,     setRecStopMult]     = useState(75)      // % of normal stop distance, stored as %
+  const [recConfBoost,    setRecConfBoost]    = useState(5)       // confidence boost pts (0-50), stored as pts
+  const [recBudget,       setRecBudget]       = useState(20)      // $ per-trade further-drawdown cap
+
   useEffect(() => { load() }, [])
   useEffect(() => {
     const iv = setInterval(() => { loadStatus(); loadLadder() }, 15000)
@@ -97,6 +107,15 @@ export default function ProtectionSettings() {
         ? s.scaleout_milestones
         : [0.05, 0.10, 0.15]
       setMilestonesStr(ms.map(x => Math.round(x * 100)).join(', '))
+      // Intra-milestone + recovery — new in the gain-preservation upgrade.
+      // `?? default` because older DB rows won't have these columns until
+      // migrate_ladder.py has run.
+      setIntraLockPct(Math.round((s.intra_lock_pct ?? 0.30) * 100))
+      setMinIntraGain(s.min_intra_gain ?? 15)
+      setRecSizeMult(Math.round((s.recovery_size_mult ?? 0.60) * 100))
+      setRecStopMult(Math.round((s.recovery_stop_mult ?? 0.75) * 100))
+      setRecConfBoost(Math.round((s.recovery_conf_boost ?? 0.05) * 100))
+      setRecBudget(s.recovery_budget ?? 20)
     } catch (e) {
       flash(`❌ Load failed: ${e.message}`)
     }
@@ -143,6 +162,14 @@ export default function ProtectionSettings() {
         scaleout_fraction:      scaleoutFrac / 100,
         concentration_pct:      concentration / 100,
         time_decay_hours:       parseFloat(timeDecayHours) || 0,
+        // Intra-milestone trailing harvest
+        intra_lock_pct:         intraLockPct / 100,
+        min_intra_gain:         parseFloat(minIntraGain) || 0,
+        // Recovery-mode tuning
+        recovery_size_mult:     recSizeMult / 100,
+        recovery_stop_mult:     recStopMult / 100,
+        recovery_conf_boost:    recConfBoost / 100,
+        recovery_budget:        parseFloat(recBudget) || 0,
       })
       setCfg(updated)
       flash('✅ Protection settings saved')
@@ -374,6 +401,161 @@ export default function ProtectionSettings() {
                 <p className="text-xs text-gray-500">{opt.sub}</p>
               </button>
             ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Intra-milestone trailing harvest ────────────────────────────── */}
+      <div className="space-y-4 border-t border-dark-600 pt-4">
+        <div className="flex items-center gap-3">
+          <TrendingUp size={18} className="text-brand-400" />
+          <div>
+            <h3 className="text-white font-bold text-base">Gain preservation — intra-milestone trigger</h3>
+            <p className="text-xs text-gray-500">
+              Locks partial progress between ladder steps. If equity climbs above floor
+              and then pulls back by more than this percentage of the peak, positions close
+              to bank realized gains before they evaporate.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Intra give-back % */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Giveback tolerance %
+              <span className="ml-2 text-gray-600">(of intra-milestone gain)</span>
+            </label>
+            <div className="relative">
+              <input
+                type="number" min="5" max="95" step="5"
+                value={intraLockPct}
+                onChange={e => setIntraLockPct(parseFloat(e.target.value) || 0)}
+                className="w-full bg-dark-700 border border-dark-600 rounded-lg pl-3 pr-8 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">%</span>
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              Lock {100 - intraLockPct}% of every intra-milestone gain.
+              Lower = tighter protection; higher = let winners breathe.
+            </p>
+          </div>
+
+          {/* Minimum gain to arm */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Min gain to arm trigger
+              <span className="ml-2 text-gray-600">(noise floor)</span>
+            </label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+              <input
+                type="number" min="1" step="1"
+                value={minIntraGain}
+                onChange={e => setMinIntraGain(parseFloat(e.target.value) || 0)}
+                className="w-full bg-dark-700 border border-dark-600 rounded-lg pl-8 pr-3 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              Trigger won't fire until peak is more than ${money(minIntraGain, 0)} above floor.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Recovery mode — below sacred base ───────────────────────────── */}
+      <div className="space-y-4 border-t border-dark-600 pt-4">
+        <div className="flex items-center gap-3">
+          <AlertTriangle size={18} className="text-yellow-400" />
+          <div>
+            <h3 className="text-white font-bold text-base">Recovery mode — when equity dips below base</h3>
+            <p className="text-xs text-gray-500">
+              If live equity falls below your starting capital, the bot keeps trading
+              with much tighter risk so it can climb back. Normal halt is suspended only
+              when no gains are locked above the base.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Size multiplier */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Position size ×
+              <span className="ml-2 text-gray-600">(fraction of normal)</span>
+            </label>
+            <div className="relative">
+              <input
+                type="number" min="5" max="150" step="5"
+                value={recSizeMult}
+                onChange={e => setRecSizeMult(parseFloat(e.target.value) || 0)}
+                className="w-full bg-dark-700 border border-dark-600 rounded-lg pl-3 pr-8 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">%</span>
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              Shrinks dollar-risk per trade while in recovery.
+            </p>
+          </div>
+
+          {/* Stop multiplier */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Stop distance ×
+              <span className="ml-2 text-gray-600">(tighter = smaller)</span>
+            </label>
+            <div className="relative">
+              <input
+                type="number" min="25" max="200" step="5"
+                value={recStopMult}
+                onChange={e => setRecStopMult(parseFloat(e.target.value) || 0)}
+                className="w-full bg-dark-700 border border-dark-600 rounded-lg pl-3 pr-8 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">%</span>
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              Tighter stops cap each loss — 75% is a good default.
+            </p>
+          </div>
+
+          {/* Confidence boost */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Confidence boost
+              <span className="ml-2 text-gray-600">(extra pts over min)</span>
+            </label>
+            <div className="relative">
+              <input
+                type="number" min="0" max="50" step="1"
+                value={recConfBoost}
+                onChange={e => setRecConfBoost(parseFloat(e.target.value) || 0)}
+                className="w-full bg-dark-700 border border-dark-600 rounded-lg pl-3 pr-8 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">pts</span>
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              Only take higher-conviction trades while recovering.
+            </p>
+          </div>
+
+          {/* Drawdown budget */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Per-trade drawdown cap
+              <span className="ml-2 text-gray-600">($ risk vs equity)</span>
+            </label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+              <input
+                type="number" min="1" step="1"
+                value={recBudget}
+                onChange={e => setRecBudget(parseFloat(e.target.value) || 0)}
+                className="w-full bg-dark-700 border border-dark-600 rounded-lg pl-8 pr-3 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              No trade may risk pushing equity more than ${money(recBudget, 0)} lower.
+            </p>
           </div>
         </div>
       </div>
