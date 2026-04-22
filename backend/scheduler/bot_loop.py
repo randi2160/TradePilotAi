@@ -524,18 +524,21 @@ class BotLoop:
         user_id = self.user_id or 1  # per-user; fallback to 1 only for legacy system bot
         try:
             with SessionLocal() as db:
-                # 1-pre) Snapshot + ratchet — MUST run in the bot tick itself,
-                #        not only when the UI polls /dashboard/today. Previously
-                #        the floor only ratcheted up when the user's browser
-                #        happened to fetch the endpoint, so a closed winner
-                #        at 11:30 wouldn't raise the floor until the next poll
-                #        (or never, if the user wasn't watching). Now every
-                #        15s protection tick re-computes compound realized
-                #        and lifts the floor to its new milestone.
+                # 1-pre) Floor ratchet — lightweight DB-only path.
+                #        Original design called snapshot_today() here, but that
+                #        does TWO Alpaca HTTP round-trips (account + positions)
+                #        on every 15s tick — blocks the asyncio event loop for
+                #        ~1s per tick, making API responses feel sluggish.
+                #        ratchet_tick() uses the same compound_total math but
+                #        derives it from the DB directly (trades + daily_pnl),
+                #        so no broker calls are needed just to lift the floor.
+                #        The full snapshot still runs post-harvest (below) and
+                #        whenever the UI polls /dashboard/today — that's where
+                #        live equity/unrealized refresh happens.
                 try:
-                    daily_pnl_service.snapshot_today(db, user_id, broker=self.broker)
+                    daily_pnl_service.ratchet_tick(db, user_id)
                 except Exception as _sn_e:
-                    logger.warning(f"snapshot/ratchet in protection tick: {_sn_e}")
+                    logger.warning(f"ratchet_tick in protection tick: {_sn_e}")
 
                 # 1a) Ladder tick — per-position peak tracking, trail exits,
                 #     partial scale-outs. Runs FIRST because it's more

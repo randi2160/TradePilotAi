@@ -70,6 +70,27 @@ def _compound_before(db: Session, user_id: int, day: str) -> float:
     return float(total or 0.0)
 
 
+def ratchet_tick(db: Session, user_id: int) -> dict:
+    """Fast-path floor ratchet — DB only, no broker HTTP.
+
+    The full `snapshot_today()` calls Alpaca twice (account + positions) which
+    blocks the asyncio event loop for ~500-700ms per call. When this runs on
+    a 15-second bot tick the cumulative freeze makes API requests feel sluggish.
+
+    For floor ratcheting we only need `compound_total` — the running sum of
+    realized gains — which is entirely derivable from the DB:
+        compound_total = _compound_before(today) + _realized_today(today)
+
+    Returns the ratchet_floor result. Safe to call on every tick.
+    """
+    from services import protection_service  # local import to avoid cycle
+    day       = _today_str()
+    realized, _, _, _ = _realized_today(db, user_id, day)
+    prior     = _compound_before(db, user_id, day)
+    compound  = prior + float(realized or 0.0)
+    return protection_service.ratchet_floor(db, user_id, compound)
+
+
 def snapshot_today(db: Session, user_id: int, broker=None) -> DailyPnL:
     """
     Upsert today's DailyPnL row for `user_id`. Safe to call repeatedly —
