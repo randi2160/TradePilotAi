@@ -20,3 +20,8 @@ passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
 slowapi==0.1.9
 sendgrid==6.11.0
+# Crypto data fallback when Alpaca rate-limits or returns thin bars. The
+# alpaca_client.get_crypto_bars path uses yfinance as a 15-min-delayed
+# secondary source. Without it we get a warning log per crypto fallback
+# attempt and the engine runs blind on that pair.
+yfinance>=0.2.40
