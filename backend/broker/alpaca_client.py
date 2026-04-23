@@ -82,7 +82,11 @@ class AlpacaClient:
             self.crypto_data = None
             logger.warning(f"CryptoHistoricalDataClient unavailable: {e}")
         mode = "PAPER" if paper else "LIVE"
-        logger.info(f"AlpacaClient ready ({mode}) key=...{key[-4:] if key else 'NONE'}")
+        # DEBUG not INFO — every cache miss builds a client, and at peak polling
+        # the INFO spam buried real events. The per-user cache in main.py keeps
+        # actual rebuilds rare (once per ~5 minutes per user); when one happens,
+        # the DEBUG line is enough.
+        logger.debug(f"AlpacaClient ready ({mode}) key=...{key[-4:] if key else 'NONE'}")
 
     # ── Account ──────────────────────────────────────────────────────────────
 

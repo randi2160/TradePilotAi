@@ -1472,6 +1472,25 @@ async def get_pdt(user: User = Depends(get_current_user)):
 
 from services import daily_pnl_service as _dpnl
 
+# Per-user AlpacaClient cache. Previously every endpoint call rebuilt the
+# whole client (TradingClient + StockHistoricalDataClient + CryptoData) which
+# costs ~50-200ms of connection-pool + TLS setup each. At peak polling the
+# UI was spawning ~2 clients/sec. Cache hashes on (user_id, api_key_tail, paper)
+# so a credential rotation invalidates automatically on next fetch, and a stale
+# entry times out after BROKER_CACHE_TTL seconds.
+import time as _broker_cache_time
+_broker_cache: dict = {}      # { (user_id, key_tail, paper): (client, expiry_ts) }
+_BROKER_CACHE_TTL = 300.0     # 5 minutes — long enough to matter, short enough to pick up cred edits
+
+
+def _broker_cache_evict(user_id: int) -> None:
+    """Drop any cached clients for this user — call from credential-change
+    paths to force a rebuild on next access."""
+    keys_to_drop = [k for k in _broker_cache if k[0] == user_id]
+    for k in keys_to_drop:
+        _broker_cache.pop(k, None)
+
+
 def _resolve_broker(user: User = None):
     """Return a broker client scoped to the calling user's own credentials.
 
@@ -1480,6 +1499,9 @@ def _resolve_broker(user: User = None):
     who hit a dashboard endpoint — causing new signups to see the admin's
     portfolio, equity, and positions. We now ALWAYS load the caller's saved
     credentials and return None if they haven't connected a broker.
+
+    Performance: cached per user for up to 5 minutes. The cache key includes
+    the api_key tail so a credential rotation invalidates on its own.
     """
     if user is None:
         return None
@@ -1504,12 +1526,27 @@ def _resolve_broker(user: User = None):
     else:
         paper = (getattr(user, "alpaca_mode", "paper") or "paper") != "live"
 
+    # ── Cache lookup ──────────────────────────────────────────────────────────
+    api_key  = creds.get("api_key") or ""
+    key_tail = api_key[-8:] if api_key else ""
+    cache_k  = (user.id, key_tail, paper)
+    now_ts   = _broker_cache_time.time()
+    hit = _broker_cache.get(cache_k)
+    if hit is not None:
+        client, expiry_ts = hit
+        if expiry_ts > now_ts:
+            return client
+        # Expired — fall through to rebuild
+        _broker_cache.pop(cache_k, None)
+
     try:
-        return AlpacaClient(
+        client = AlpacaClient(
             paper      = paper,
-            api_key    = creds.get("api_key"),
+            api_key    = api_key,
             api_secret = creds.get("api_secret"),
         )
+        _broker_cache[cache_k] = (client, now_ts + _BROKER_CACHE_TTL)
+        return client
     except Exception as e:
         logger.warning(f"dashboard: broker build failed for user {user.id} ({e})")
         return None
