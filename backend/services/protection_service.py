@@ -124,6 +124,11 @@ def update_settings(db: Session, user_id: int, updates: dict) -> ProtectionSetti
         "recovery_stop_mult",
         "recovery_conf_boost",
         "recovery_budget",
+        # Entry filters
+        "min_stock_conf",
+        "min_crypto_conf",
+        "min_rr",
+        "max_total_positions",
     }
     for k, v in (updates or {}).items():
         if k in allowed and v is not None:
@@ -184,6 +189,24 @@ def update_settings(db: Session, user_id: int, updates: dict) -> ProtectionSetti
         row.recovery_budget = max(1.0, float(row.recovery_budget or 20.0))
     except Exception:
         row.recovery_budget = 20.0
+
+    # Entry-filter clamps. Confidence values are fractions (0-1).
+    try:
+        row.min_stock_conf  = max(0.0, min(0.99, float(row.min_stock_conf  or 0.55)))
+    except Exception:
+        row.min_stock_conf  = 0.55
+    try:
+        row.min_crypto_conf = max(0.0, min(0.99, float(row.min_crypto_conf or 0.55)))
+    except Exception:
+        row.min_crypto_conf = 0.55
+    try:
+        row.min_rr = max(0.5, min(10.0, float(row.min_rr or 1.5)))
+    except Exception:
+        row.min_rr = 1.5
+    try:
+        row.max_total_positions = max(1, min(50, int(row.max_total_positions or 6)))
+    except Exception:
+        row.max_total_positions = 6
 
     db.commit()
     db.refresh(row)
@@ -320,14 +343,22 @@ def should_intra_harvest(settings: ProtectionSettings, live_equity: float) -> di
 
 
 def run_intra_harvest(db: Session, user_id: int, broker) -> dict:
-    """Close ALL open stock positions to realize whatever gains exist. Called
-    once the should_intra_harvest trigger has fired (after the bot_loop's 2-tick
-    confirmation to filter noise). Returns a summary dict."""
+    """Close WINNING positions to realize whatever gains exist right now, before
+    they slip away. Losers are deliberately left alone — they have stop-loss
+    orders and might still recover; force-closing them here would just convert
+    floating losses into realized losses, which defeats the whole point.
+
+    Previously this closed every position indiscriminately (booking losses)
+    and skipped crypto entirely (useless for a crypto-heavy portfolio). Now
+    it handles both asset classes and filters to unrealized_pnl > 0.
+
+    Returns {closed, skipped_losers, errors}."""
     if broker is None:
         return {"closed": [], "error": "no_broker"}
 
-    closed: list[str] = []
-    errs:   list[str] = []
+    closed:           list[str] = []
+    skipped_losers:   list[str] = []
+    errs:             list[str] = []
     try:
         positions = broker.get_positions() or []
     except Exception as e:
@@ -337,15 +368,21 @@ def run_intra_harvest(db: Session, user_id: int, broker) -> dict:
         sym = p.get("symbol") or p.get("asset_id")
         if not sym:
             continue
-        # Skip crypto here — ladder/harvest handle those separately. We only
-        # intra-harvest stock positions because their day-session drift is
-        # what the intra-milestone trigger is designed to catch.
-        cls = (p.get("asset_class") or "").lower()
-        if cls in ("crypto", "cryptocurrency"):
+        # Normalize unrealized P&L — some fields are named differently across
+        # Alpaca REST vs the normalized client wrapper.
+        upnl_raw = (p.get("unrealized_pnl")
+                    or p.get("unrealized_pl")
+                    or 0)
+        try:
+            upnl = float(upnl_raw or 0)
+        except Exception:
+            upnl = 0.0
+        if upnl <= 0:
+            skipped_losers.append(f"{sym} (${upnl:.2f})")
             continue
         try:
             broker.close_position(sym)
-            closed.append(sym)
+            closed.append(f"{sym} (+${upnl:.2f})")
         except Exception as e:
             errs.append(f"{sym}: {e}")
 
@@ -355,10 +392,11 @@ def run_intra_harvest(db: Session, user_id: int, broker) -> dict:
 
     logger.warning(
         f"🌾 INTRA-HARVEST for user {user_id}: "
-        f"closed {len(closed)} position(s) "
-        f"{('errs=' + str(errs)) if errs else ''}"
+        f"closed {len(closed)} winner(s) {closed}, "
+        f"left {len(skipped_losers)} loser(s) to their stops {skipped_losers}"
+        f"{(' errs=' + str(errs)) if errs else ''}"
     )
-    return {"closed": closed, "errors": errs}
+    return {"closed": closed, "skipped_losers": skipped_losers, "errors": errs}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

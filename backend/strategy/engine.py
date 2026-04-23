@@ -173,9 +173,9 @@ class StrategyEngine:
         atr   = signal.get("atr", 0)
 
         # ── Read protection settings up-front ─────────────────────────────────
-        # Two things we need from them: (a) recovery-mode flag + multipliers
-        # for risk sizing, (b) recovery_budget for the pre-trade floor gate.
-        # One query, reused below — avoids two round-trips on every entry.
+        # Grab everything we need in one query: recovery flags, floor values,
+        # AND the user-configurable entry filters (min_stock_conf, min_rr,
+        # max_total_positions) so we don't round-trip the DB multiple times.
         _recovery_mode     = False
         _rec_size_mult     = 1.0
         _rec_stop_mult     = 1.0
@@ -184,6 +184,9 @@ class StrategyEngine:
         _protection_ready  = False
         _live_equity       = 0.0
         _settings_snapshot = None
+        _min_stock_conf    = float(config.MIN_CONFIDENCE_SCORE)
+        _min_rr            = 1.5
+        _max_total_positions = 6
         if self.user_id:
             try:
                 from database.database import SessionLocal as _PSL
@@ -198,6 +201,15 @@ class StrategyEngine:
                         _rec_stop_mult  = float(_s.recovery_stop_mult  or 0.75)
                         _rec_conf_boost = float(_s.recovery_conf_boost or 0.05)
                         _rec_budget     = float(_s.recovery_budget     or 20.0)
+                        # Entry filters — the STRICTER of config.MIN_CONFIDENCE_SCORE
+                        # and user's per-asset knob wins, so lowering the user
+                        # knob never relaxes the global floor.
+                        _min_stock_conf = max(
+                            float(config.MIN_CONFIDENCE_SCORE),
+                            float(_s.min_stock_conf or 0.55),
+                        )
+                        _min_rr              = float(_s.min_rr or 1.5)
+                        _max_total_positions = int(_s.max_total_positions or 6)
                         _settings_snapshot = {
                             "floor_value":     float(_s.floor_value     or 0.0),
                             "initial_capital": float(_s.initial_capital or 0.0),
@@ -206,17 +218,39 @@ class StrategyEngine:
             except Exception as _ps_e:
                 logger.warning(f"protection snapshot for {symbol}: {_ps_e}")
 
-        # Recovery mode requires an extra bump over the ensemble's threshold —
-        # the trade needs to be that much higher quality to justify risking
-        # capital when we're already below the base.
+        # ── Stock confidence gate (Fix #1) ────────────────────────────────────
+        # scan_symbol already checks config.MIN_CONFIDENCE_SCORE; we re-check
+        # here with the user's potentially-stricter knob, plus recovery boost.
+        _required_conf = _min_stock_conf
         if _recovery_mode and _rec_conf_boost > 0:
-            if float(signal.get("confidence", 0) or 0) < (config.MIN_CONFIDENCE_SCORE + _rec_conf_boost):
-                logger.info(
-                    f"🔧 Recovery: blocking {symbol} — conf {signal['confidence']:.2f} < "
-                    f"{config.MIN_CONFIDENCE_SCORE + _rec_conf_boost:.2f} "
-                    f"(base {config.MIN_CONFIDENCE_SCORE:.2f} + boost {_rec_conf_boost:.2f})"
-                )
-                return
+            _required_conf += _rec_conf_boost
+        if float(signal.get("confidence", 0) or 0) < _required_conf:
+            logger.info(
+                f"🚫 Stock conf gate block {symbol}: "
+                f"conf {signal['confidence']:.2f} < required {_required_conf:.2f}"
+                f"{' (recovery boost applied)' if _recovery_mode else ''}"
+            )
+            return
+
+        # ── Portfolio-wide position cap (Fix #3) ─────────────────────────────
+        # Combined stocks + crypto count — guards against 3 stocks + 3 crypto
+        # blowing past a user-set cap of 5 total.
+        if _protection_ready:
+            try:
+                _all_pos = self.broker.get_positions() or []
+                if len(_all_pos) >= _max_total_positions:
+                    logger.info(
+                        f"🚫 Portfolio cap reached: {len(_all_pos)} open positions "
+                        f">= max_total_positions={_max_total_positions}. "
+                        f"Skipping {symbol} entry."
+                    )
+                    return
+            except Exception as _cap_e:
+                logger.debug(f"total-position cap check: {_cap_e}")
+
+        # Note: recovery-mode confidence boost is already folded into
+        # _required_conf by the stock confidence gate above — no separate
+        # recovery check needed here.
 
         sizing = self.risk.size_position(
             symbol       = symbol,
@@ -243,6 +277,25 @@ class StrategyEngine:
         if side != "BUY":
             logger.debug(f"Skipping {side} signal for {symbol} — only BUY (long) trades enabled")
             return
+
+        # ── Minimum R:R gate (Fix #4) ────────────────────────────────────────
+        # (take_profit - price) / (price - stop_loss) must clear min_rr. This
+        # single filter would have skipped about half of yesterday's losers —
+        # many had stops wider than targets (R:R < 1) which is a guaranteed
+        # losing expectation even at a 60% hit rate.
+        _tp = float(sizing.get("take_profit", 0) or 0)
+        _sl = float(sizing.get("stop_loss",   0) or 0)
+        _reward = _tp - price
+        _risk   = price - _sl
+        if _risk > 0 and _reward > 0:
+            _rr = _reward / _risk
+            if _rr < _min_rr:
+                logger.info(
+                    f"🚫 Stock R:R gate block {symbol}: "
+                    f"reward ${_reward:.2f} / risk ${_risk:.2f} = {_rr:.2f} "
+                    f"< {_min_rr:.2f} required"
+                )
+                return
 
         # ── Pre-trade floor gate (gain-protection enforcement) ────────────────
         # Uses the settings snapshot we already loaded above. Worst-case loss

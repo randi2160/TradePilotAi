@@ -81,6 +81,12 @@ export default function ProtectionSettings() {
   const [recConfBoost,    setRecConfBoost]    = useState(5)       // confidence boost pts (0-50), stored as pts
   const [recBudget,       setRecBudget]       = useState(20)      // $ per-trade further-drawdown cap
 
+  // Entry filters — stop low-quality trades before they open
+  const [minStockConf,    setMinStockConf]    = useState(55)      // %, stored as %
+  const [minCryptoConf,   setMinCryptoConf]   = useState(55)      // %, stored as %
+  const [minRR,           setMinRR]           = useState(1.5)     // ratio (unitless)
+  const [maxTotalPos,     setMaxTotalPos]     = useState(6)       // integer, portfolio-wide cap
+
   useEffect(() => { load() }, [])
   useEffect(() => {
     const iv = setInterval(() => { loadStatus(); loadLadder() }, 15000)
@@ -116,6 +122,11 @@ export default function ProtectionSettings() {
       setRecStopMult(Math.round((s.recovery_stop_mult ?? 0.75) * 100))
       setRecConfBoost(Math.round((s.recovery_conf_boost ?? 0.05) * 100))
       setRecBudget(s.recovery_budget ?? 20)
+      // Entry filters — new in the trade-quality upgrade
+      setMinStockConf(Math.round((s.min_stock_conf  ?? 0.55) * 100))
+      setMinCryptoConf(Math.round((s.min_crypto_conf ?? 0.55) * 100))
+      setMinRR(s.min_rr ?? 1.5)
+      setMaxTotalPos(s.max_total_positions ?? 6)
     } catch (e) {
       flash(`❌ Load failed: ${e.message}`)
     }
@@ -170,6 +181,11 @@ export default function ProtectionSettings() {
         recovery_stop_mult:     recStopMult / 100,
         recovery_conf_boost:    recConfBoost / 100,
         recovery_budget:        parseFloat(recBudget) || 0,
+        // Entry filters — trade-quality gate
+        min_stock_conf:         minStockConf / 100,
+        min_crypto_conf:        minCryptoConf / 100,
+        min_rr:                 parseFloat(minRR) || 1.5,
+        max_total_positions:    parseInt(maxTotalPos, 10) || 6,
       })
       setCfg(updated)
       flash('✅ Protection settings saved')
@@ -401,6 +417,97 @@ export default function ProtectionSettings() {
                 <p className="text-xs text-gray-500">{opt.sub}</p>
               </button>
             ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Entry filters — block low-quality trades up front ───────────── */}
+      <div className="space-y-4 border-t border-dark-600 pt-4">
+        <div className="flex items-center gap-3">
+          <Zap size={18} className="text-brand-400" />
+          <div>
+            <h3 className="text-white font-bold text-base">Entry filters — trade quality gate</h3>
+            <p className="text-xs text-gray-500">
+              These run BEFORE an order is placed. If a signal fails any of them,
+              the bot sits the trade out. Raising any of these will reduce trade
+              frequency and improve average quality.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Stock min confidence */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Minimum stock confidence
+              <span className="ml-2 text-gray-600">(ensemble score)</span>
+            </label>
+            <div className="relative">
+              <input
+                type="number" min="30" max="95" step="1"
+                value={minStockConf}
+                onChange={e => setMinStockConf(parseFloat(e.target.value) || 0)}
+                className="w-full bg-dark-700 border border-dark-600 rounded-lg pl-3 pr-8 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">%</span>
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              Stock signals below {minStockConf}% confidence are skipped.
+            </p>
+          </div>
+
+          {/* Crypto min confidence */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Minimum crypto confidence
+              <span className="ml-2 text-gray-600">(probability)</span>
+            </label>
+            <div className="relative">
+              <input
+                type="number" min="30" max="95" step="1"
+                value={minCryptoConf}
+                onChange={e => setMinCryptoConf(parseFloat(e.target.value) || 0)}
+                className="w-full bg-dark-700 border border-dark-600 rounded-lg pl-3 pr-8 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">%</span>
+            </div>
+            <p className="text-xs text-gray-600 mt-1">
+              Crypto scalps below {minCryptoConf}% probability are skipped.
+            </p>
+          </div>
+
+          {/* Minimum R:R */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Minimum R:R
+              <span className="ml-2 text-gray-600">(reward ÷ risk)</span>
+            </label>
+            <input
+              type="number" min="0.5" max="10" step="0.1"
+              value={minRR}
+              onChange={e => setMinRR(parseFloat(e.target.value) || 0)}
+              className="w-full bg-dark-700 border border-dark-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+            />
+            <p className="text-xs text-gray-600 mt-1">
+              Refuses trades where target move isn't at least {minRR}× the stop distance.
+            </p>
+          </div>
+
+          {/* Max total positions */}
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              Portfolio position cap
+              <span className="ml-2 text-gray-600">(stocks + crypto total)</span>
+            </label>
+            <input
+              type="number" min="1" max="50" step="1"
+              value={maxTotalPos}
+              onChange={e => setMaxTotalPos(parseInt(e.target.value, 10) || 0)}
+              className="w-full bg-dark-700 border border-dark-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-brand-500"
+            />
+            <p className="text-xs text-gray-600 mt-1">
+              Bot won't open new trades when total open positions ≥ {maxTotalPos}.
+            </p>
           </div>
         </div>
       </div>

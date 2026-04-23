@@ -261,6 +261,15 @@ class ProtectionSettings(Base):
     recovery_conf_boost       = Column(Float, default=0.05)  # require min_conf + 0.05 to enter
     recovery_budget           = Column(Float, default=20.0)  # max $ further drawdown allowed per trade
 
+    # ── Entry filters — stop bad trades from happening in the first place ─
+    # Without these, the bot takes noisy low-conviction setups whose R:R is
+    # < 1 (stop wider than target), stacks multiple entries on the same
+    # symbol, and piles up 10+ concurrent positions. All three eat gains.
+    min_stock_conf       = Column(Float,   default=0.55)   # ensemble confidence floor for stock entry
+    min_crypto_conf      = Column(Float,   default=0.55)   # probability floor for crypto entry
+    min_rr               = Column(Float,   default=1.5)    # require (target-entry)/(entry-stop) ≥ this
+    max_total_positions  = Column(Integer, default=6)      # combined stocks + crypto cap
+
     # Ladder config — per-position trailing + scale-out
     # Tiers are hardcoded in services/ladder_service.LADDER_TIERS. These flags
     # just toggle whether the ladder runs at all, and the scale-out fractions.

@@ -850,29 +850,44 @@ class CryptoEngine:
             min_conf = max(self.min_probability, 0.60)
             logger.info(f"⚠️  {self.consecutive_losses} losses — raising confidence to {min_conf:.0%}")
 
-        # Valid = meets confidence threshold (raised after loss streaks)
-        valid_tradeable = [c for c in tradeable if c.get("valid") and
-                          c.get("probability", c.get("confidence", 0) / 100) >= min_conf]
+        # ── User-configured entry filters from ProtectionSettings ────────────
+        # Read fresh every scan so UI edits take effect without bot restart.
+        # min_crypto_conf overrides the constructor's min_probability — this is
+        # the knob users actually tune in the UI. min_rr and max_total_positions
+        # are consulted later (per-trade, pre-order).
+        user_min_conf  = min_conf
+        self._user_min_rr              = 1.5
+        self._user_max_total_positions = 6
+        try:
+            if self._user_id:
+                from database.database import SessionLocal as _PS_SL
+                from services          import protection_service as _prot
+                with _PS_SL() as _pdb:
+                    _s = _prot.get_or_create(_pdb, self._user_id)
+                    if _s.enabled:
+                        user_min_conf = max(user_min_conf,
+                                            float(_s.min_crypto_conf or 0.55))
+                        self._user_min_rr              = float(_s.min_rr or 1.5)
+                        self._user_max_total_positions = int(_s.max_total_positions or 6)
+        except Exception as _ef:
+            logger.debug(f"entry-filter read: {_ef}")
 
+        # Valid = meets confidence threshold (the STRICTER of streak-raised
+        # min_conf and user-configured min_crypto_conf)
+        valid_tradeable = [c for c in tradeable if c.get("valid") and
+                          c.get("probability", c.get("confidence", 0) / 100) >= user_min_conf]
+
+        # NO score-based fallback. Previously we had an "if score >= 60 take
+        # it anyway" branch that bypassed confidence — that's exactly how the
+        # 31-41% confidence trades slipped through. If nothing meets the bar,
+        # we sit out this cycle. That's the whole point of the gate.
         if not valid_tradeable:
-            # Only pick fallback if confidence streak is clean
-            if self.consecutive_losses < 2:
-                best_available = sorted(tradeable, key=lambda x: x["score"], reverse=True)[0]
-                # Raise the fallback score bar — 60+ means real setup, not noise
-                if best_available.get("score", 0) >= 60:
-                    logger.info(
-                        f"🎯 No coin meets threshold — trading best available: "
-                        f"{best_available.get('ticker')} score={best_available.get('score',0):.0f}"
-                    )
-                    valid_tradeable = [best_available]
-                else:
-                    logger.info("Market quiet — no quality setup, sitting out")
-                    self.state = EngineState.IDLE
-                    return self.status()
-            else:
-                logger.info(f"Loss streak {self.consecutive_losses} — waiting for high-quality setup only")
-                self.state = EngineState.IDLE
-                return self.status()
+            logger.info(
+                f"Crypto scan: no candidate meets min_conf={user_min_conf:.0%} "
+                f"(streak={self.consecutive_losses}). Sitting out this cycle."
+            )
+            self.state = EngineState.IDLE
+            return self.status()
 
         # Best tradeable candidate
         self.state = EngineState.CANDIDATE_RANKED
@@ -886,6 +901,64 @@ class CryptoEngine:
             logger.info(f"Sizing rejected: {sizing.get('reason')}")
             self.state = EngineState.IDLE
             return self.status()
+
+        # ── Pre-order R:R gate (Fix #4) ──────────────────────────────────────
+        # Refuse any trade where the target isn't at least min_rr× further than
+        # the stop. A trade with R:R < 1 is a guaranteed losing strategy even
+        # at 60% win rate. We compute R:R from the same stop_dist / expected_move
+        # the order placement below will use, so the number is accurate.
+        _stop_d = float(sizing.get("stop_dist") or 0)
+        _exp_mv = float(best.get("expected_move") or 0)
+        if _stop_d > 0 and _exp_mv > 0:
+            _rr_preview = _exp_mv / _stop_d
+            if _rr_preview < self._user_min_rr:
+                logger.info(
+                    f"🚫 Crypto R:R gate block {best.get('symbol')}: "
+                    f"target move ${_exp_mv:.4f} / stop dist ${_stop_d:.4f} = "
+                    f"{_rr_preview:.2f} < {self._user_min_rr:.2f} required"
+                )
+                self.state = EngineState.IDLE
+                return self.status()
+
+        # ── Portfolio-wide position cap (Fix #3) ─────────────────────────────
+        # Count ALL open positions across stocks + crypto from the broker.
+        # The per-engine max_positions is still respected above; this layer
+        # prevents stacking 2 stocks + 2 crypto = 4 when the user set their
+        # portfolio-wide cap to 3.
+        try:
+            _all_pos = self.broker.get_positions() or []
+            if len(_all_pos) >= self._user_max_total_positions:
+                logger.info(
+                    f"🚫 Portfolio cap reached: {len(_all_pos)} open positions "
+                    f">= max_total_positions={self._user_max_total_positions}. "
+                    f"Skipping new crypto entry."
+                )
+                self.state = EngineState.IDLE
+                return self.status()
+        except Exception as _cap_e:
+            logger.debug(f"total-position cap check: {_cap_e}")
+
+        # ── Anti-stacking re-sync (Fix #2 safety net) ─────────────────────────
+        # The `already_held` filter earlier in this function uses the in-memory
+        # dict which can lag if prior cycles are still mid-fill. Re-fetch the
+        # broker's live positions here and bail if the chosen ticker already
+        # has ANY open position. This catches the race condition where the
+        # bot opened LTC 30s ago, the fill hasn't hit our dict yet, and we're
+        # about to open another LTC.
+        _base_ticker = best["symbol"].split("/")[0]
+        try:
+            _live = self.broker.get_positions() or []
+            for _p in _live:
+                _s = (_p.get("symbol") or "").upper().replace("/", "").replace("USD", "")
+                if _s and _s == _base_ticker:
+                    logger.info(
+                        f"🚫 Anti-stack: {_base_ticker} already held at broker "
+                        f"(not in in-memory dict yet). Skipping duplicate entry."
+                    )
+                    self.state = EngineState.POSITION_OPEN
+                    return self.status()
+        except Exception as _as_e:
+            logger.debug(f"anti-stack check: {_as_e}")
 
         # Place order — market only, software-managed stop/target
         self.state = EngineState.ORDER_PENDING

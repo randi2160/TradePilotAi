@@ -1650,6 +1650,11 @@ async def protection_get_settings(
         "recovery_stop_mult":    float(getattr(row, "recovery_stop_mult",  0.75) or 0.75),
         "recovery_conf_boost":   float(getattr(row, "recovery_conf_boost", 0.05) or 0.05),
         "recovery_budget":       float(getattr(row, "recovery_budget",     20.0) or 20.0),
+        # Entry filters
+        "min_stock_conf":        float(getattr(row, "min_stock_conf",  0.55) or 0.55),
+        "min_crypto_conf":       float(getattr(row, "min_crypto_conf", 0.55) or 0.55),
+        "min_rr":                float(getattr(row, "min_rr",           1.5) or 1.5),
+        "max_total_positions":   int(getattr(row, "max_total_positions", 6)  or 6),
     }
 
 

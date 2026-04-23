@@ -63,6 +63,11 @@ PROTECTION_LADDER_COLUMNS = [
     ("recovery_stop_mult",         "DOUBLE PRECISION", "REAL",     "0.75"),
     ("recovery_conf_boost",        "DOUBLE PRECISION", "REAL",     "0.05"),
     ("recovery_budget",            "DOUBLE PRECISION", "REAL",     "20.0"),
+    # Entry filters — quality gate before a trade can open
+    ("min_stock_conf",             "DOUBLE PRECISION", "REAL",     "0.55"),
+    ("min_crypto_conf",            "DOUBLE PRECISION", "REAL",     "0.55"),
+    ("min_rr",                     "DOUBLE PRECISION", "REAL",     "1.5"),
+    ("max_total_positions",        "INTEGER",          "INTEGER",  "6"),
 ]
 
 
