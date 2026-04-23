@@ -242,7 +242,12 @@ export default function BotControls({ data, user }) {
   }
 
   const configRows = [
-    ['Capital',        '$' + (data?.settings?.capital ?? settings?.capital ?? 5000).toLocaleString()],
+    // Prefer the REST /api/settings value (settings?.capital) over the WebSocket
+    // push (data?.settings?.capital). The WS payload carries the bot's in-memory
+    // tracker.capital, which only updates if the per-user bot exists and the
+    // update_capital endpoint reached it — so it can stay stale after a save
+    // while user.capital in the DB is correct. The REST value IS the DB truth.
+    ['Capital',        '$' + (settings?.capital ?? data?.settings?.capital ?? 5000).toLocaleString()],
     ['Daily Target',   '$' + (data?.target_min ?? settings?.daily_target_min ?? 100) + ' – $' + (data?.target_max ?? settings?.daily_target_max ?? 250)],
     ['Max Daily Loss', '$' + (settings?.max_daily_loss ?? 150) + ' (kill-switch)'],
     ['Max Positions',  (settings?.max_open_positions ?? 3) + ' concurrent'],
