@@ -16,6 +16,7 @@ from strategy.daily_target     import DailyTargetTracker
 from strategy.risk_manager     import DynamicRiskManager
 from strategy.pdt_engine       import PDTComplianceEngine
 from strategy.setup_classifier import SetupClassifier
+from strategy.orb_engine       import ORBEngine
 
 logger = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
@@ -42,6 +43,12 @@ class StrategyEngine:
         self.regime_detector  = RegimeDetector()
         self._current_regime  = None       # refreshed every scan cycle
         self._regime_df       = None       # SPY bars for regime detection
+
+        # Opening Range Breakout — additive strategy. Records 9:30-9:45 ET
+        # opening range per symbol, generates BUY signals on breakout above
+        # the range high with volume confirmation. Fused with ensemble below;
+        # never replaces it.
+        self.orb = ORBEngine()
 
         self._signals: dict[str, dict] = {}
         self._open:    dict[str, dict] = {}
@@ -126,6 +133,51 @@ class StrategyEngine:
         signal["regime"]        = (self._current_regime or {}).get("regime", "neutral")
         if setup.get("description"):
             signal.setdefault("reasons", []).append(setup["description"])
+
+        # ── 2c. ORB fusion (ADDITIVE — never replaces ensemble) ──────────────
+        # During the opening-range window we feed each scan's bars into the
+        # ORB tracker so it can build the 9:30-9:45 high/low. After 9:45 it
+        # stops accepting new bars and finalizes the range. Between 9:45 and
+        # 11:00 ET, we ask ORB if this symbol is breaking out — if it is,
+        # we fuse the result with the ensemble:
+        #   - ensemble BUY    + ORB BUY  → confidence boosted to max of both
+        #                                  + setup is forced tradeable
+        #                                  + reason annotated for the trade log
+        #   - ensemble HOLD   + ORB BUY  → upgrade to BUY only if ensemble
+        #                                  conf is at least 0.50 (don't trade
+        #                                  on ORB alone when ML is bearish)
+        #   - ensemble SELL   + ORB BUY  → ignore ORB; ML conviction wins
+        # If ORB throws or returns None, this whole block is a no-op and the
+        # existing ensemble/setup flow runs unchanged.
+        try:
+            if self.orb.is_active():
+                if self.orb.in_recording_window():
+                    self.orb.update_range(symbol, df)
+                else:
+                    self.orb.finalize_if_due(symbol)
+                    orb_sig = self.orb.check_breakout(symbol, df)
+                    if orb_sig:
+                        ens_signal = signal.get("signal", "HOLD")
+                        ens_conf   = float(signal.get("confidence", 0) or 0)
+                        if ens_signal == "BUY":
+                            signal["confidence"] = max(ens_conf, orb_sig["confidence"])
+                            signal["setup_tradeable"] = True
+                            signal.setdefault("reasons", []).extend(orb_sig.get("reasons", []))
+                            signal["orb_breakout"] = True
+                            logger.info(f"🚀 ORB+Ensemble BUY confirm {symbol}: "
+                                        f"conf={signal['confidence']:.2f} "
+                                        f"orb_high=${orb_sig['orb_high']:.2f}")
+                        elif ens_signal == "HOLD" and ens_conf >= 0.50:
+                            signal["signal"]     = "BUY"
+                            signal["confidence"] = orb_sig["confidence"]
+                            signal["setup_tradeable"] = True
+                            signal.setdefault("reasons", []).extend(orb_sig.get("reasons", []))
+                            signal["orb_breakout"] = True
+                            logger.info(f"🚀 ORB-only BUY {symbol}: ensemble HOLD@{ens_conf:.2f} "
+                                        f"upgraded to BUY@{orb_sig['confidence']:.2f}")
+                        # ensemble SELL → ignore ORB silently (no log spam)
+        except Exception as _orb_e:
+            logger.debug(f"ORB fusion {symbol}: {_orb_e}")
 
         self._signals[symbol] = signal
 
