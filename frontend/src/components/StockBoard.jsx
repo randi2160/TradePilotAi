@@ -73,21 +73,52 @@ function PostCard({ post, currentUserId, onLike }) {
 }
 
 // ── Compose Box ───────────────────────────────────────────────────────────────
+// Backend caps content at 500 chars (social_routes.ChatPost.max_length=500).
+// We mirror that here so users can't silently exceed it.
+const POST_MAX_LEN = 500
+
 function ComposeBox({ symbol, onPosted }) {
   const [msg,       setMsg]       = useState('')
   const [sentiment, setSentiment] = useState('neutral')
   const [posting,   setPosting]   = useState(false)
+  // Inline error so failed posts (rate-limit, 422, network) don't disappear
+  // into the console — previously the catch was `console.error(e)` only,
+  // which made the whole post flow look broken to users.
+  const [errorMsg,  setErrorMsg]  = useState('')
 
   async function post() {
     if (!msg.trim() || posting) return
+    setErrorMsg('')
     setPosting(true)
     try {
       await api.post(`/social/chat/${symbol}`, { content: msg.trim(), sentiment })
       setMsg('')
       onPosted?.()
-    } catch (e) { console.error(e) }
-    finally { setPosting(false) }
+    } catch (e) {
+      console.error(e)
+      // Try to surface the server's own message; fall back to a generic line.
+      const detail = e.response?.data?.detail
+      let friendly  = ''
+      if (Array.isArray(detail)) {
+        // FastAPI 422 — look for the content/length error specifically
+        const tooLong = detail.find(d =>
+          (d.loc || []).includes('content') &&
+          (d.type || '').includes('string_too_long')
+        )
+        friendly = tooLong
+          ? `Post is too long — ${POST_MAX_LEN} character max.`
+          : (detail[0]?.msg || 'Post rejected.')
+      } else if (typeof detail === 'string') {
+        friendly = detail
+      } else {
+        friendly = e.message || 'Could not post — try again.'
+      }
+      setErrorMsg(friendly)
+    } finally { setPosting(false) }
   }
+
+  const charsLeft = POST_MAX_LEN - msg.length
+  const overLimit = charsLeft < 0     // belt-and-braces; maxLength on the input prevents typing past
 
   return (
     <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 space-y-3">
@@ -98,6 +129,7 @@ function ComposeBox({ symbol, onPosted }) {
         onKeyDown={e => e.key === 'Enter' && e.ctrlKey && post()}
         placeholder={`What's your take on $${symbol}? Be specific — mention price levels, catalysts, or charts...`}
         rows={3}
+        maxLength={POST_MAX_LEN}
         className="w-full bg-dark-900 border border-dark-600 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-brand-500 placeholder-gray-700 resize-none"
       />
       <div className="flex items-center gap-2">
@@ -115,11 +147,19 @@ function ComposeBox({ symbol, onPosted }) {
             </button>
           ))}
         </div>
-        <button onClick={post} disabled={!msg.trim() || posting}
+        <span className={`text-xs ${charsLeft < 50 ? (overLimit ? 'text-red-400' : 'text-yellow-400') : 'text-gray-600'}`}>
+          {msg.length}/{POST_MAX_LEN}
+        </span>
+        <button onClick={post} disabled={!msg.trim() || posting || overLimit}
           className="flex items-center gap-1.5 px-4 py-1.5 bg-brand-500 hover:bg-brand-600 text-dark-900 font-bold rounded-xl text-sm disabled:opacity-40 transition-all">
           <Send size={13}/> {posting ? 'Posting…' : 'Post'}
         </button>
       </div>
+      {errorMsg && (
+        <div className="text-xs text-red-400 bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2">
+          {errorMsg}
+        </div>
+      )}
       <p className="text-xs text-gray-700">Ctrl+Enter to post · Community guidelines apply · Not financial advice</p>
     </div>
   )
