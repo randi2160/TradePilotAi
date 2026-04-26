@@ -138,15 +138,21 @@ class StrategyEngine:
                 signal["confidence"] >= config.MIN_CONFIDENCE_SCORE and \
                 symbol not in self._open:
 
-            # NEW: Block low-quality setups — but let high-confidence signals through
-            # Setup quality < 50 AND ensemble confidence < 0.70 → skip
-            # (high ML confidence can override a marginal setup)
-            if not setup.get("tradeable", True) and signal["confidence"] < 0.70:
+            # Block low-quality setups — but let moderately-confident signals
+            # through. Previously the override threshold was 0.70 which blocked
+            # most valid setups (ensemble typically reports 0.55-0.65). With
+            # the downstream R:R gate (1.5 min), portfolio position cap, and
+            # intra-harvest protection in place, the setup filter doesn't need
+            # to be this strict — it was doing redundant gating. Dropped to
+            # 0.60 so setups at 0.60+ confidence can override a "no_trade"
+            # classification and reach the sizer (where R:R still gates them).
+            _SETUP_OVERRIDE = 0.60
+            if not setup.get("tradeable", True) and signal["confidence"] < _SETUP_OVERRIDE:
                 logger.info(
                     f"⚠️  {symbol} {signal['signal']} blocked by setup filter: "
                     f"setup={setup.get('setup_type','?')} quality={setup.get('quality',0):.0f} "
                     f"issues={setup.get('quality_issues',[])} | "
-                    f"conf={signal['confidence']:.2f} < 0.70 override threshold"
+                    f"conf={signal['confidence']:.2f} < {_SETUP_OVERRIDE:.2f} override threshold"
                 )
                 signal["action"] = "SETUP_BLOCKED"
             else:

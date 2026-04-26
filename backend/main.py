@@ -1552,15 +1552,41 @@ def _resolve_broker(user: User = None):
         return None
 
 
+# Per-user micro-cache for /api/dashboard/today. The frontend polls this from
+# multiple components at once — before caching we were doing 5 Alpaca round-
+# trips in 3 seconds, each ~600ms, which blocked the event loop and made the
+# whole app feel sluggish. A 3-second TTL is short enough that the UI's 5s
+# poll interval still gets "fresh" data on every real cycle, while coalescing
+# the simultaneous multi-component bursts into one round-trip.
+#
+# Bypassed by:
+#   • POST /api/dashboard/snapshot (explicit force refresh)
+#   • Post-harvest path in bot_loop (calls snapshot_today directly)
+#   • finalize_day (calls snapshot_today directly)
+import time as _dash_cache_time
+_DASH_TODAY_CACHE: dict = {}    # { user_id: (payload, expiry_ts) }
+_DASH_TODAY_TTL = 3.0           # seconds
+
 @app.get("/api/dashboard/today", tags=["Dashboard"])
 async def dashboard_today(
     user: User    = Depends(get_current_user),
     db:   Session = Depends(get_db),
 ):
     """Today's P&L snapshot — realized, unrealized, combined — plus the running
-    compound total and %. Calling this refreshes the DailyPnL row from Alpaca."""
-    broker = _resolve_broker(user)
-    return _dpnl.get_today(db, user.id, broker=broker, refresh=True)
+    compound total and %. Calling this refreshes the DailyPnL row from Alpaca,
+    with a 3s per-user cache to coalesce parallel UI polls."""
+    now_ts = _dash_cache_time.time()
+    hit = _DASH_TODAY_CACHE.get(user.id)
+    if hit is not None:
+        payload, expiry_ts = hit
+        if expiry_ts > now_ts:
+            return payload
+        _DASH_TODAY_CACHE.pop(user.id, None)
+
+    broker  = _resolve_broker(user)
+    payload = _dpnl.get_today(db, user.id, broker=broker, refresh=True)
+    _DASH_TODAY_CACHE[user.id] = (payload, now_ts + _DASH_TODAY_TTL)
+    return payload
 
 
 @app.get("/api/dashboard/history", tags=["Dashboard"])
@@ -1614,6 +1640,9 @@ async def dashboard_force_snapshot(
     """Force an immediate snapshot — useful for manual 'refresh' buttons."""
     broker = _resolve_broker(user)
     row = _dpnl.snapshot_today(db, user.id, broker=broker)
+    # Invalidate the 3s cache so the next /api/dashboard/today call returns
+    # this freshly-computed row instead of the pre-force cached one.
+    _DASH_TODAY_CACHE.pop(user.id, None)
     return _dpnl._row_to_dict(row)
 
 
@@ -2140,8 +2169,41 @@ async def update_capital(body: CapitalBody,
     user_bot = get_user_bot_if_exists(user.id)
     if user_bot is not None:
         user_bot.tracker.capital = body.capital
+        # Also update the risk manager's capital (used by position sizing).
+        # Without this, the sizer keeps using the old capital for max-position
+        # calculations even though the user clearly intended the new one.
+        if hasattr(user_bot, "risk"):
+            user_bot.risk.capital = float(body.capital)
     user.capital    = body.capital
     db.commit()
+
+    # ── Propagate to ProtectionSettings ───────────────────────────────────
+    # Without this, `initial_capital` and `floor_value` stay frozen at
+    # whatever the account started with, so increasing capital from $5k to
+    # $15k leaves the "sacred base" stuck at $5k — $10k of new equity sits
+    # unprotected. We always lift initial_capital to the new capital, and
+    # raise floor_value to at least the new capital (but never LOWER an
+    # already-higher floor that came from ratcheted realized gains). The
+    # intra-milestone peak tracker is cleared so the next trailing-harvest
+    # calculation uses the new baseline.
+    try:
+        from services import protection_service as _ps
+        settings = _ps.get_or_create(db, user.id)
+        old_base  = float(settings.initial_capital or 0.0)
+        old_floor = float(settings.floor_value or 0.0)
+        new_base  = float(body.capital)
+        settings.initial_capital        = new_base
+        settings.floor_value            = max(old_floor, new_base)
+        settings.peak_equity_since_ratchet = None
+        db.commit()
+        logger.info(
+            f"📈 Capital change propagated to ProtectionSettings for user {user.id}: "
+            f"base ${old_base:.0f} → ${new_base:.0f}, "
+            f"floor ${old_floor:.0f} → ${settings.floor_value:.0f}"
+        )
+    except Exception as _ps_e:
+        logger.warning(f"Capital->protection propagation failed for user {user.id}: {_ps_e}")
+
     return {"capital": body.capital, "status": "updated"}
 
 class TargetsBody(BaseModel):
