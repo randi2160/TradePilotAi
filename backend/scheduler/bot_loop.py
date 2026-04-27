@@ -693,6 +693,13 @@ class BotLoop:
                         protection_service.update_peak_equity(db, user_id, live_equity)
                     except Exception as e:
                         logger.warning(f"update_peak_equity: {e}")
+                    # 2a-bis) Track recovery-mode trough so intra-harvest can
+                    # protect partial recovery progress when equity is below
+                    # the sacred base (where it would otherwise be unguarded).
+                    try:
+                        protection_service.update_recovery_state(db, user_id, live_equity)
+                    except Exception as e:
+                        logger.warning(f"update_recovery_state: {e}")
 
                     # 2b) Refresh recovery mode flag for the engine. Transition
                     # logs help diagnose why sizing suddenly tightened.

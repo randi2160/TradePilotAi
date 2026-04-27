@@ -263,8 +263,10 @@ def ratchet_floor(db: Session, user_id: int, compound_total: float) -> dict:
             settings.peak_compound = compound_total
         # Reset the intra-milestone peak tracker — a ratchet means we've just
         # banked gains and the next giveback calculation should start from
-        # the new floor, not the old peak.
+        # the new floor, not the old peak. Also wipe any recovery_low so
+        # post-ratchet recovery tracking starts fresh.
         settings.peak_equity_since_ratchet = None
+        settings.recovery_low_since_entry  = None
         db.commit()
         db.refresh(settings)
         logger.info(
@@ -288,18 +290,23 @@ def ratchet_floor(db: Session, user_id: int, compound_total: float) -> dict:
 
 def update_peak_equity(db: Session, user_id: int, live_equity: float) -> float:
     """Track the highest equity seen since the last floor ratchet. Called every
-    protection tick. Returns the (possibly updated) peak."""
+    protection tick. Returns the (possibly updated) peak.
+
+    Tracks ACTUAL live equity — does not seed against the floor. That earlier
+    behavior caused a silent gap: when equity was below floor (recovery mode),
+    peak was floored at floor_value and gain_above_floor stayed at zero, so
+    the intra-harvest never armed even when unrealized gains accumulated.
+    Now we always track the real high-water mark; compute_dynamic_trigger
+    decides which baseline to use depending on whether we're above or below
+    the floor."""
     if live_equity is None or live_equity <= 0:
         return 0.0
     settings = get_or_create(db, user_id)
     cur_peak = float(settings.peak_equity_since_ratchet or 0.0)
-    # Seed peak on first read — use the greater of live equity and current floor
-    # so the initial trigger calculation can't ever bank negative "progress".
     if cur_peak <= 0:
-        seed = max(float(live_equity), float(settings.floor_value or 0.0))
-        settings.peak_equity_since_ratchet = seed
+        settings.peak_equity_since_ratchet = float(live_equity)
         db.commit()
-        return seed
+        return float(live_equity)
     if float(live_equity) > cur_peak:
         settings.peak_equity_since_ratchet = float(live_equity)
         db.commit()
@@ -307,20 +314,106 @@ def update_peak_equity(db: Session, user_id: int, live_equity: float) -> float:
     return cur_peak
 
 
+def update_recovery_state(db: Session, user_id: int, live_equity: float) -> Optional[float]:
+    """Maintain the recovery-mode trough.
+
+    - Entering recovery (equity drops below initial_capital): seed
+      recovery_low_since_entry = live_equity.
+    - Still in recovery: recovery_low = min(recovery_low, live_equity).
+    - Exiting recovery (equity climbs back above initial_capital): clear
+      recovery_low_since_entry to None.
+
+    Returns the current recovery_low (or None when not in recovery).
+    Called on every protection tick from bot_loop.
+    """
+    if live_equity is None or live_equity <= 0:
+        return None
+    settings = get_or_create(db, user_id)
+    if not settings.enabled:
+        return None
+    base = float(settings.initial_capital or 0.0)
+    live = float(live_equity)
+    cur_low = settings.recovery_low_since_entry
+    cur_low = float(cur_low) if cur_low is not None else None
+    in_recovery_now = (live > 0 and live < base)
+    changed = False
+    if in_recovery_now:
+        if cur_low is None:
+            settings.recovery_low_since_entry = live
+            cur_low = live
+            changed = True
+            logger.info(
+                f"📉 Recovery state opened for user {user_id}: "
+                f"equity ${live:.2f} below base ${base:.2f}, "
+                f"recovery_low seeded at ${live:.2f}"
+            )
+        elif live < cur_low:
+            settings.recovery_low_since_entry = live
+            cur_low = live
+            changed = True
+    else:
+        # Equity is at or above base — recovery's done. Wipe the trough so
+        # the next dip starts fresh tracking instead of comparing against a
+        # weeks-old number.
+        if cur_low is not None:
+            settings.recovery_low_since_entry = None
+            cur_low = None
+            changed = True
+            logger.info(
+                f"📈 Recovery state cleared for user {user_id}: "
+                f"equity ${live:.2f} >= base ${base:.2f}"
+            )
+    if changed:
+        db.commit()
+    return cur_low
+
+
 def compute_dynamic_trigger(settings: ProtectionSettings) -> Optional[float]:
     """Pure function: the equity level at which we harvest to lock intra-gains.
 
-        trigger = peak − (peak − floor) × intra_lock_pct
+    Two modes — chosen based on whether the running peak is above or below
+    the user's locked floor:
 
-    Returns None when there's no meaningful peak above floor yet (don't arm)."""
+    NORMAL MODE (peak > floor):
+        trigger = peak − (peak − floor) × intra_lock_pct
+        Locks partial gains above the floor.
+
+    RECOVERY MODE (peak ≤ floor and recovery_low_since_entry is set):
+        trigger = peak − (peak − recovery_low) × intra_lock_pct
+        Locks partial recovery progress — the climb from the recovery trough
+        toward base, even though we're still below the floor. This is the
+        case the user kept losing gains in: equity bottomed at $4,960,
+        recovered to $4,995 (+$35 unrealized), and previously the trigger
+        was None because peak−floor was -$5. Now baseline is recovery_low
+        ($4,960), gain is +$35, and we lock 85% of it.
+
+    Returns None when there's no meaningful gain to protect yet."""
     peak  = float(settings.peak_equity_since_ratchet or 0.0)
     floor = float(settings.floor_value or 0.0)
-    gain_above_floor = peak - floor
-    min_gain = float(settings.min_intra_gain or 0.0)
-    if gain_above_floor <= min_gain:
+    if peak <= 0:
         return None
+    min_gain = float(settings.min_intra_gain or 0.0)
     giveback_pct = max(0.0, min(1.0, float(settings.intra_lock_pct or 0.0)))
-    return peak - gain_above_floor * giveback_pct
+
+    if peak > floor:
+        # Normal mode — protect gains above the floor.
+        gain = peak - floor
+        if gain <= min_gain:
+            return None
+        return peak - gain * giveback_pct
+
+    # Recovery mode — peak is below the floor (still climbing back to base).
+    # Use recovery_low as the baseline for the trigger calculation.
+    rec_low = settings.recovery_low_since_entry
+    if rec_low is None:
+        return None
+    rec_low = float(rec_low)
+    if rec_low <= 0 or peak <= rec_low:
+        return None
+    gain = peak - rec_low
+    if gain <= min_gain:
+        return None
+    return peak - gain * giveback_pct
 
 
 def should_intra_harvest(settings: ProtectionSettings, live_equity: float) -> dict:

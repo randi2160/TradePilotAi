@@ -248,6 +248,12 @@ class ProtectionSettings(Base):
     intra_lock_pct            = Column(Float, default=0.15)  # 15% giveback (lock 85% of intra-gain) — tightened
     min_intra_gain            = Column(Float, default=5.0)   # arm trigger at just $5 unrealized — was $15
     peak_equity_since_ratchet = Column(Float, nullable=True) # running peak, resets each ratchet
+    # Recovery-mode trough — lowest equity seen while live < initial_capital.
+    # Used as the baseline for intra-harvest calc when peak is below floor:
+    # we lock recovery progress (peak − recovery_low) instead of progress
+    # above the floor, so even a $30 climb back toward base gets protected.
+    # Cleared automatically when equity climbs back above base.
+    recovery_low_since_entry  = Column(Float, nullable=True)
 
     # ── Recovery mode — when live equity dips below initial_capital ──────
     # Instead of halting the bot (classic breach response), we keep trading

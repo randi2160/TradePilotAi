@@ -59,6 +59,7 @@ PROTECTION_LADDER_COLUMNS = [
     ("intra_lock_pct",             "DOUBLE PRECISION", "REAL",     "0.30"),
     ("min_intra_gain",             "DOUBLE PRECISION", "REAL",     "15.0"),
     ("peak_equity_since_ratchet",  "DOUBLE PRECISION", "REAL",     None),
+    ("recovery_low_since_entry",   "DOUBLE PRECISION", "REAL",     None),
     ("recovery_size_mult",         "DOUBLE PRECISION", "REAL",     "0.60"),
     ("recovery_stop_mult",         "DOUBLE PRECISION", "REAL",     "0.75"),
     ("recovery_conf_boost",        "DOUBLE PRECISION", "REAL",     "0.05"),
