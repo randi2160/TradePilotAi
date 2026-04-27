@@ -245,8 +245,8 @@ class ProtectionSettings(Base):
     # back by `intra_lock_pct` of the gain-above-floor (peaked), we force-
     # close open positions to convert unrealized → realized, and the floor
     # ratchets based on the now-banked compound total.
-    intra_lock_pct            = Column(Float, default=0.30)  # 30% intra-gain giveback tolerance
-    min_intra_gain            = Column(Float, default=15.0)  # don't arm trigger under $15 of intra-gain (noise floor)
+    intra_lock_pct            = Column(Float, default=0.15)  # 15% giveback (lock 85% of intra-gain) — tightened
+    min_intra_gain            = Column(Float, default=5.0)   # arm trigger at just $5 unrealized — was $15
     peak_equity_since_ratchet = Column(Float, nullable=True) # running peak, resets each ratchet
 
     # ── Recovery mode — when live equity dips below initial_capital ──────

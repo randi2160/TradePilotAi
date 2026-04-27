@@ -317,15 +317,69 @@ class BotLoop:
         while self.status == "running":
             try:
                 now = datetime.now(ET)
+                market_open = self.broker.is_market_open()
 
-                # Daily retrain
-                if now.date() != last_train_day and now.hour >= 9:
-                    await self._train_models()
-                    last_train_day = now.date()
+                # Daily retrain — only attempt while market is open (training
+                # data fetch hits the equities API). When market is closed we
+                # just skip; the next morning catches up.
+                if market_open:
+                    if now.date() != last_train_day and now.hour >= 9:
+                        await self._train_models()
+                        last_train_day = now.date()
 
-                if not self.broker.is_market_open():
-                    logger.debug("Market closed — sleeping 60s (bot still running)")
-                    await asyncio.sleep(60)
+                # ── Protection tick MUST run 24/7 ────────────────────────────
+                # Crypto trades around the clock. Intra-milestone harvest,
+                # account floor ratchet, breach detection, recovery mode,
+                # daily-target lock — all of these need to keep watching
+                # even when stocks are closed. Previously the protection
+                # block was BELOW the market-open guard, so from 4 PM ET to
+                # 9:30 AM ET (16 hours per weekday + all weekend) the bot
+                # slept and crypto positions were completely unwatched —
+                # which is how a $160 unrealized peak evaporated to -$19
+                # overnight without the harvest ever firing.
+                try:
+                    positions_24h = self.broker.get_positions() or []
+                except Exception as _gp_e:
+                    logger.warning(f"24/7 protection tick: get_positions failed: {_gp_e}")
+                    positions_24h = []
+
+                # Update tracker so the dashboard reflects current unrealized
+                # even outside market hours (mainly meaningful for crypto).
+                try:
+                    upnl = sum(float(p.get("unrealized_pnl", 0) or 0) for p in positions_24h)
+                    self.tracker.update_unrealized(upnl)
+                except Exception:
+                    pass
+
+                # If a previous tick already flagged a breach, close + stop.
+                if self._floor_breached:
+                    logger.warning("🛑 Floor breach flag active — closing all + stopping")
+                    try:
+                        for p in positions_24h:
+                            sym = p.get("symbol", "")
+                            if sym:
+                                self.broker.close_position(sym)
+                                logger.info(f"🛑 Breach close: {sym}")
+                    except Exception as e:
+                        logger.warning(f"breach close-all: {e}")
+                    self.status = "stopped"
+                    break
+
+                # Run the actual protection tick at 15s cadence
+                try:
+                    import time as _pt_time
+                    now_ts = _pt_time.time()
+                    if now_ts - last_harvest_ts > 15:
+                        last_harvest_ts = now_ts
+                        await self._run_protection_tick(positions_24h)
+                except Exception as e:
+                    logger.warning(f"protection tick failed: {e}")
+
+                # Stock-market-closed path ends here — sleep and loop. The
+                # protection tick above already ran for crypto coverage.
+                if not market_open:
+                    logger.debug("Market closed — protection tick ran; sleeping 30s")
+                    await asyncio.sleep(30)
                     continue
 
                 # Refresh market regime every 5 minutes (SPY-based)
@@ -352,38 +406,15 @@ class BotLoop:
                     await asyncio.sleep(300)
                     continue
 
+                # Sync the engine's view of stock positions while market is
+                # open. The 24/7 protection tick above already pulled
+                # positions_24h, but the engine's per-position bookkeeping
+                # for stops/targets only matters during regular hours.
                 self.engine.sync_positions()
-                positions  = self.broker.get_positions()
-                unrealized = sum(p.get("unrealized_pnl", 0) for p in positions)
-                self.tracker.update_unrealized(unrealized)
-
-                # ── HARD BREACH CHECK — runs EVERY iteration, not rate-limited ──
-                # If floor was already breached, close everything and stop.
-                if self._floor_breached:
-                    logger.warning("🛑 Floor breach flag active — closing all + stopping")
-                    try:
-                        for p in positions:
-                            sym = p.get("symbol", "")
-                            if sym:
-                                self.broker.close_position(sym)
-                                logger.info(f"🛑 Breach close: {sym}")
-                    except Exception as e:
-                        logger.warning(f"breach close-all: {e}")
-                    self.status = "stopped"
-                    break
-
-                # ── Profit protection (account-level floor + harvest + breach) ──
-                # The snapshot ratchets the floor automatically; here we watch
-                # live equity for breaches and periodically harvest oversized
-                # unrealized winners into realized so they're permanently banked.
-                try:
-                    import time as _t
-                    now_ts = _t.time()
-                    if now_ts - last_harvest_ts > 15:   # every 15s for fast protection
-                        last_harvest_ts = now_ts
-                        await self._run_protection_tick(positions)
-                except Exception as e:
-                    logger.warning(f"protection tick failed: {e}")
+                # Re-use the positions list from the 24/7 tick above so we
+                # don't double-fetch from Alpaca. (NOTE: positions_24h is
+                # what `_run_protection_tick` already operated on.)
+                positions = positions_24h
 
                 should_stop, reason = self.tracker.should_stop()
                 if should_stop:

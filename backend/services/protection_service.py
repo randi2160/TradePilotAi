@@ -44,8 +44,10 @@ def get_or_create(db: Session, user_id: int) -> ProtectionSettings:
           .one_or_none()
     )
     if row:
-        # One-time migration: tighten legacy defaults for existing users
-        # (lock_pct was 0.70, milestone was $100 — now 0.90 and $50)
+        # One-time migration: tighten legacy defaults for existing users.
+        # We only migrate values that match an OLDER default exactly — never
+        # overwrite a user's deliberately-chosen tuning. Each block bumps a
+        # single field if it's still at its prior default.
         migrated = False
         if float(row.lock_pct or 0) < 0.85 and float(row.lock_pct or 0) == 0.70:
             row.lock_pct = 0.90
@@ -61,6 +63,14 @@ def get_or_create(db: Session, user_id: int) -> ProtectionSettings:
             migrated = True
         if not row.scaleout_enabled:
             row.scaleout_enabled = True
+            migrated = True
+        # Intra-milestone harvest — was 0.30 / $15, now 0.15 / $5 so the
+        # trigger arms earlier and gives back less of the peak.
+        if float(row.intra_lock_pct or 0) == 0.30:
+            row.intra_lock_pct = 0.15
+            migrated = True
+        if float(row.min_intra_gain or 0) == 15.0:
+            row.min_intra_gain = 5.0
             migrated = True
         if migrated:
             db.commit()
