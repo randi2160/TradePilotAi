@@ -2174,6 +2174,32 @@ async def update_capital(body: CapitalBody,
         # calculations even though the user clearly intended the new one.
         if hasattr(user_bot, "risk"):
             user_bot.risk.capital = float(body.capital)
+        # Persist to user_settings.json AND invalidate the cached DayPlan so
+        # the capital_planner rebuilds today's stock_budget / crypto_budget
+        # from the new value on its very next call. Without this the planner
+        # would keep sizing trades against the old capital until the bot was
+        # restarted (could be hours or until tomorrow's plan rebuild).
+        try:
+            if hasattr(user_bot, "_settings") and user_bot._settings is not None:
+                user_bot._settings.set_capital(float(body.capital))
+        except Exception as _sm_e:
+            logger.warning(f"settings_manager.set_capital failed: {_sm_e}")
+    # Invalidate the global hybrid engine's plan too — same staleness risk
+    # because it has its own settings_manager instance reading the same JSON.
+    try:
+        if _hybrid_engine is not None and getattr(_hybrid_engine, "planner", None) is not None:
+            _hybrid_engine.planner._plan      = None
+            _hybrid_engine.planner._plan_date = ""
+            # Best-effort: also push the new capital into the hybrid engine's
+            # own settings instance so its next plan-build uses it.
+            if hasattr(_hybrid_engine, "settings") and _hybrid_engine.settings is not None:
+                try:
+                    _hybrid_engine.settings.set_capital(float(body.capital))
+                except Exception:
+                    pass
+            logger.info("📈 capital_planner.DayPlan invalidated — will rebuild with new capital")
+    except Exception as _hp_e:
+        logger.warning(f"hybrid planner invalidation failed: {_hp_e}")
     user.capital    = body.capital
     db.commit()
 

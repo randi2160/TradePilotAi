@@ -17,6 +17,7 @@ from strategy.risk_manager     import DynamicRiskManager
 from strategy.pdt_engine       import PDTComplianceEngine
 from strategy.setup_classifier import SetupClassifier
 from strategy.orb_engine       import ORBEngine
+from data.news_scanner         import NewsScanner
 
 logger = logging.getLogger(__name__)
 ET = pytz.timezone("America/New_York")
@@ -49,6 +50,11 @@ class StrategyEngine:
         # the range high with volume confirmation. Fused with ensemble below;
         # never replaces it.
         self.orb = ORBEngine()
+
+        # News sentiment scanner — keyword-based (no LLM cost), 300s cache,
+        # graceful fallback to neutral on any error. Used as a small
+        # confidence modifier on signals; never blocks a trade by itself.
+        self.news = NewsScanner()
 
         self._signals: dict[str, dict] = {}
         self._open:    dict[str, dict] = {}
@@ -178,6 +184,44 @@ class StrategyEngine:
                         # ensemble SELL → ignore ORB silently (no log spam)
         except Exception as _orb_e:
             logger.debug(f"ORB fusion {symbol}: {_orb_e}")
+
+        # ── 2d. News sentiment fusion (ADDITIVE — confidence modifier only) ─
+        # Reads aggregated keyword sentiment from data/news_scanner.py — uses
+        # Alpaca's news API + a static bullish/bearish word bank. No LLM cost.
+        # 300-second per-symbol cache, async-safe, returns neutral on any
+        # failure. We apply the result as a SMALL confidence nudge:
+        #   bullish news (+score >  0.2) and BUY signal  → +0.05 boost
+        #   bearish news (-score < -0.2) and BUY signal  → -0.10 penalty
+        #   bullish news and SELL signal                  → -0.10 penalty
+        #   bearish news and SELL signal                  → +0.05 boost
+        # Capped at ±0.10 total. We never veto a trade purely on sentiment —
+        # the goal is to tilt the existing ensemble decision by a fraction
+        # when the news flow agrees or disagrees, not to override the model.
+        try:
+            sent = await self.news.get_sentiment_signal(symbol)
+            label = sent.get("sentiment", "neutral")
+            score = float(sent.get("score", 0) or 0)
+            n_art = int(sent.get("articles", 0) or 0)
+            sig_dir = signal.get("signal", "HOLD")
+            if n_art > 0 and sig_dir in ("BUY", "SELL"):
+                delta = 0.0
+                if label == "bullish":
+                    delta = 0.05 if sig_dir == "BUY" else -0.10
+                elif label == "bearish":
+                    delta = -0.10 if sig_dir == "BUY" else 0.05
+                if delta != 0.0:
+                    old_conf = float(signal.get("confidence", 0) or 0)
+                    new_conf = max(0.0, min(0.99, old_conf + delta))
+                    signal["confidence"]   = new_conf
+                    signal["news_score"]   = score
+                    signal["news_label"]   = label
+                    signal["news_articles"] = n_art
+                    signal.setdefault("reasons", []).append(
+                        f"News {label} ({n_art} articles, score {score:+.2f}) "
+                        f"→ conf {old_conf:.2f}→{new_conf:.2f}"
+                    )
+        except Exception as _news_e:
+            logger.debug(f"News fusion {symbol}: {_news_e}")
 
         self._signals[symbol] = signal
 

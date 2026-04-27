@@ -61,6 +61,11 @@ class BotLoop:
         # Recovery mode — equity below the sacred base. Surfaced to the engine
         # so new entries use tighter sizing/stops/confidence.
         self._recovery_mode: bool = False
+        # Daily-target lock — once realized P&L crosses target_min today,
+        # snap the floor up so today's gains can't be given back. One-shot
+        # per day; cleared on bot restart (= new trading day).
+        self._target_locked_today: bool = False
+        self._target_locked_date:  str  = ""
 
     # ── Control ───────────────────────────────────────────────────────────────
 
@@ -539,6 +544,43 @@ class BotLoop:
                     daily_pnl_service.ratchet_tick(db, user_id)
                 except Exception as _sn_e:
                     logger.warning(f"ratchet_tick in protection tick: {_sn_e}")
+
+                # 1-pre-b) Daily target lock — when realized P&L first crosses
+                # target_min today, snap the floor up immediately so the gain
+                # can't be given back. Without this, hitting the daily target
+                # only ratchets the floor gradually (every $10 of compound),
+                # which means partial swings can erode the achievement.
+                # One-shot per day; the date check resets on a new trading day.
+                try:
+                    today_str = datetime.now(ET).strftime("%Y-%m-%d")
+                    if self._target_locked_date != today_str:
+                        # New day — clear the lock flag
+                        self._target_locked_today = False
+                        self._target_locked_date  = today_str
+                    if (not self._target_locked_today
+                            and self.tracker is not None
+                            and self.tracker.realized_pnl >= self.tracker.target_min > 0):
+                        # First time crossing target_min today — lock it.
+                        # We bump the floor as if we'd already compounded
+                        # `target_min` of realized gains; protection_service
+                        # will round it down to the nearest milestone.
+                        try:
+                            r = protection_service.ratchet_floor(
+                                db, user_id, float(self.tracker.realized_pnl)
+                            )
+                            new_floor = r.get("floor_value", 0.0) if isinstance(r, dict) else 0.0
+                        except Exception as _rf_e:
+                            logger.warning(f"target-hit ratchet failed: {_rf_e}")
+                            new_floor = 0.0
+                        self._target_locked_today = True
+                        logger.warning(
+                            f"🎯 DAILY TARGET HIT — realized "
+                            f"${float(self.tracker.realized_pnl):.2f} "
+                            f">= target ${float(self.tracker.target_min):.2f}. "
+                            f"Floor snapped up to ${new_floor:.2f}."
+                        )
+                except Exception as _th_e:
+                    logger.warning(f"target-hit lock check: {_th_e}")
 
                 # 1a) Ladder tick — per-position peak tracking, trail exits,
                 #     partial scale-outs. Runs FIRST because it's more
