@@ -5,6 +5,7 @@ import {
   updateProtectionSettings,
   getProtectionStatus,
   forceHarvest,
+  lockInProfitNow,
   getLadderStatus,
   forceLadderTick,
 } from '../services/api'
@@ -205,6 +206,35 @@ export default function ProtectionSettings() {
     } catch (e) {
       flash(`❌ ${e.response?.data?.detail ?? e.message}`)
     } finally { setBusy(false) }
+  }
+
+  // "Lock In Profit Now" — confirm + close every winning position regardless
+  // of size, then ratchet the floor with whatever just got realized. Different
+  // from Harvest Now which only fires on positions above the % threshold.
+  // Confirmation prompt is intentional: this is irreversible and could close
+  // small early winners the user wanted to let run.
+  const [lockBusy, setLockBusy] = useState(false)
+  async function handleLockInNow() {
+    const ok = window.confirm(
+      'Close ALL winning positions right now and lock the gains into your floor?\n\n' +
+      'Losing positions stay open with their existing stops. This cannot be undone.'
+    )
+    if (!ok) return
+    setLockBusy(true)
+    try {
+      const r = await lockInProfitNow()
+      const n = (r.closed || []).length
+      const raised = r.raised_by || 0
+      if (n > 0) {
+        flash(`💰 Locked ${n} winner(s). Floor +$${raised.toFixed(2)} → $${(r.floor_after || 0).toFixed(2)}`)
+      } else {
+        flash('No winning positions to lock right now.')
+      }
+      loadStatus()
+      loadLadder()
+    } catch (e) {
+      flash(`❌ ${e.response?.data?.detail ?? e.message}`)
+    } finally { setLockBusy(false) }
   }
 
   async function handleLadderTick() {
@@ -874,6 +904,17 @@ export default function ProtectionSettings() {
           className="flex items-center gap-2 bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-dark-900 font-bold px-4 py-2 rounded-lg transition-colors"
         >
           <Save size={16}/> {saving ? 'Saving…' : 'Save settings'}
+        </button>
+        {/* Lock Profit Now — closes EVERY winner regardless of % size and
+            ratchets the floor with the new realized. The big green button is
+            intentional: this is the user's "bank it now" panic move. */}
+        <button
+          onClick={handleLockInNow}
+          disabled={lockBusy}
+          className="flex items-center gap-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-lg transition-colors border border-green-500"
+          title="Close every position currently in profit right now and lift the floor by the realized gain. Losers keep their stops."
+        >
+          <Lock size={16}/> {lockBusy ? 'Locking…' : 'Lock Profit Now'}
         </button>
         <button
           onClick={handleHarvestNow}

@@ -63,6 +63,11 @@ export const getProtectionSettings    = ()        => api.get('/protection/settin
 export const updateProtectionSettings = (body)    => api.put('/protection/settings', body).then(r => r.data)
 export const getProtectionStatus      = ()        => api.get('/protection/status').then(r => r.data)
 export const forceHarvest             = ()        => api.post('/protection/harvest').then(r => r.data)
+// "Lock In Profit Now" — closes every position with unrealized > 0
+// regardless of % gain, then ratchets the floor with the new realized.
+// Different from forceHarvest which only fires on positions above the
+// 8% harvest_position_pct threshold.
+export const lockInProfitNow          = ()        => api.post('/protection/lock-in-now').then(r => r.data)
 
 // Ladder — per-position trailing stops + partial scale-out
 export const getLadderStatus          = ()        => api.get('/protection/ladder/status').then(r => r.data)

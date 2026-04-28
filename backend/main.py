@@ -1769,6 +1769,76 @@ async def protection_force_harvest(
     return _prot.harvest_positions(db, user.id, broker)
 
 
+@app.post("/api/protection/lock-in-now", tags=["Protection"])
+async def protection_lock_in_now(
+    user: User    = Depends(get_current_user),
+    db:   Session = Depends(get_db),
+):
+    """One-shot 'Lock In Profit' button — closes EVERY position with
+    unrealized > 0 (regardless of size or % gain), then snapshots and
+    ratchets the floor so the just-realized gains lock immediately.
+
+    Different from /api/protection/harvest:
+      • harvest only closes positions above harvest_position_pct (default 8%)
+      • lock-in-now closes EVERY winner, even +1% scalps
+
+    Use case: dashboard shows +$200 unrealized, user wants to bank it now
+    before the market reverses. One click → all winners closed → realized
+    booked → floor ratchets up. Losers are intentionally left open to ride
+    their existing stops (force-closing them would just lock in losses).
+    """
+    broker = _resolve_broker(user)
+    if broker is None:
+        raise HTTPException(400, "Broker not connected — start bot or attach broker first.")
+
+    # Step 1 — close all winners. Reuses the function the auto intra-harvest
+    # uses, so behavior is identical between manual and triggered firing.
+    harvest_result = _prot.run_intra_harvest(db, user.id, broker)
+
+    # Step 2 — snapshot today + ratchet the floor. Without this, the just-
+    # closed positions wouldn't show up in the floor calculation until the
+    # bot's next 15-second protection tick (or the next /dashboard/today
+    # poll), which feels broken to the user clicking the button.
+    floor_before = 0.0
+    floor_after  = 0.0
+    raised_by    = 0.0
+    try:
+        # Capture floor before, run snapshot (which calls ratchet_floor),
+        # then read floor after.
+        settings_before = _prot.get_or_create(db, user.id)
+        floor_before    = float(settings_before.floor_value or 0.0)
+        _dpnl.snapshot_today(db, user.id, broker=broker)
+        settings_after  = _prot.get_or_create(db, user.id)
+        floor_after     = float(settings_after.floor_value or 0.0)
+        raised_by       = max(0.0, floor_after - floor_before)
+    except Exception as e:
+        logger.warning(f"lock-in-now post-harvest snapshot: {e}")
+
+    # Invalidate the dashboard/today cache so the user's next poll returns
+    # fresh data instead of the pre-harvest snapshot.
+    try:
+        _DASH_TODAY_CACHE.pop(user.id, None)
+    except Exception:
+        pass
+
+    closed = harvest_result.get("closed", []) if isinstance(harvest_result, dict) else []
+    skipped = harvest_result.get("skipped_losers", []) if isinstance(harvest_result, dict) else []
+    logger.warning(
+        f"💰 Lock-in-now for user {user.id}: closed {len(closed)} winner(s), "
+        f"skipped {len(skipped)} loser(s), floor ${floor_before:.2f} → "
+        f"${floor_after:.2f} (+${raised_by:.2f})"
+    )
+
+    return {
+        "ok":             True,
+        "closed":         closed,
+        "skipped_losers": skipped,
+        "floor_before":   floor_before,
+        "floor_after":    floor_after,
+        "raised_by":      raised_by,
+    }
+
+
 # ── Ladder (per-position trail + partial scale-out) ──────────────────────────
 
 @app.get("/api/protection/ladder/status", tags=["Protection"])
